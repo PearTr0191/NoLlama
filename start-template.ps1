@@ -8,7 +8,9 @@
 # Args are set by install.ps1 in the generated start.ps1.
 
 param(
-    [string]$ServerArgs = ""
+    [string]$ServerArgs = "",
+    [Parameter(ValueFromRemainingArguments = $true)]
+    [string[]]$ExtraArgs = @()
 )
 
 $ErrorActionPreference = "Stop"
@@ -21,6 +23,9 @@ $VenvBinDir = if ($IsWindows) { "Scripts" } else { "bin" }
 $AllArgs = @((Join-Path $ScriptDir "nollama.py"))
 if ($ServerArgs) {
     $AllArgs += $ServerArgs.Split(" ", [StringSplitOptions]::RemoveEmptyEntries)
+}
+if ($ExtraArgs) {
+    $AllArgs += $ExtraArgs  # user overrides from the start.ps1 command line, e.g. --port 8091
 }
 
 & python @AllArgs
