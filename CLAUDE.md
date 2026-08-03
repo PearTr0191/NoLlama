@@ -57,6 +57,8 @@ OpenAI-compatible LLM/VLM server for Intel hardware. NPU-first.
 
 ## Development preferences
 
+- Read `TODONT.md` before proposing anything structural — it records approaches
+  already rejected, with the reason. Add an entry whenever one is abandoned.
 - Keep it simple. One file (`nollama.py`) is fine. Don't split into modules unless it gets unwieldy.
 - PowerShell for install/launch scripts (Windows-native users).
 - Runtime flags over hardcoded config (e.g. `--port`, `--device`).

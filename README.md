@@ -16,6 +16,44 @@ NVIDIA. See [Agent tools & coding assistants](#agent-tools--coding-assistants-vs
 
 ![NoLlama in action](docs/images/nollama-demo.gif)
 
+## When to use NoLlama, and when to use Ollama
+
+NoLlama is not trying to replace Ollama. It exists to cover the Intel
+devices Ollama doesn't reach well. Pick per device, not per project:
+
+| You want to run on | Use | Why |
+|---|---|---|
+| **Intel NPU** (Core Ultra "AI Boost") | **NoLlama** | Ollama can't target the NPU at all. This is NoLlama's reason to exist. |
+| **Intel iGPU / ARC**, text | **NoLlama** (for now) | OpenVINO INT4 is ~1.6× faster on decode than Ollama's Vulkan backend on an Arc 140V — [measured below](#nollama-vs-ollama-on-the-arc-140v-igpu). Ollama also needs `OLLAMA_IGPU_ENABLE=1` or it silently falls back to CPU. |
+| **Intel iGPU / ARC**, images | **NoLlama** | Local vision models (Qwen3-VL, Gemma 3 Vision) on Intel GPUs — Ollama has no Intel path for these. |
+| **CPU only** | **Ollama** | llama.cpp's CPU backend is mature and better supported than NoLlama's OpenVINO CPU path, `ollama pull` is easier than model conversion, and its tool-calling uses proper per-model templates rather than NoLlama's prompt-rendering-plus-parsing. (We haven't benchmarked the two on CPU — the recommendation is about maturity, not measured speed.) |
+| **NVIDIA or AMD GPU** | **Ollama** | NoLlama is [Intel-only by design](#intel-only--by-design). Ollama will always do Ollama better. |
+
+**They run side by side.** Ollama keeps its default port 11434; NoLlama
+notices that port is taken and disables its own Ollama-compatible shim
+automatically (or set `--ollama-port 0` to be explicit), leaving NoLlama's
+OpenAI API on port 8000. So a three-role setup — chat, vision, coding — is
+one NoLlama process plus Ollama:
+
+```powershell
+# NoLlama: NPU chat + iGPU vision, simultaneously → http://localhost:8000/v1
+python nollama.py --device NPU --model-dir model --gpu-model-dir gpu-model
+
+# Ollama: coding model on the CPU → http://localhost:11434
+ollama serve
+ollama pull qwen2.5-coder:7b
+```
+
+The binding constraint is memory, not device count: the NPU and iGPU both
+draw on system RAM, and Ollama's CPU model adds to the same pool. 32 GB
+handles an 8B chat + 4B vision + 7B coder at 4-bit; 64 GB is comfortable.
+NoLlama unloads idle slots after 30 minutes (`--idle-timeout`).
+
+> One process serves at most two generative models (a primary on any device
+> plus an optional GPU secondary via `--gpu-model-dir`), plus Whisper. Three
+> models means two NoLlama instances on different ports, or — better — the
+> split above.
+
 ## Quick start
 
 ```powershell
