@@ -43,7 +43,20 @@ OpenAI-compatible LLM/VLM server for Intel hardware. NPU-first.
 - Collapsible `<think>` blocks, "Just answer me, dammit!" button, temperature slider
 - `threaded=True` on Flask, concurrency via per-device locks
 - `models.json` — curated model registry (npu, gpu_vlm, gpu_llm, whisper categories)
-- `install.ps1` detects devices, shows model menu, generates `start.ps1`
+- `install.ps1` detects devices, shows model menu, generates `start.ps1`. Agent setups get
+  `--idle-timeout 0` (keeps the prefix cache alive; auto-enables prewarm). Local/cached
+  models are validated before being offered or linked: the `.bin`+`.xml` pair must exist
+  and the `.bin` must not be truncated (#17) — the IR `.xml` records each weight blob's
+  offset+size, so max(offset+size) is the exact minimum `.bin` size (the IR has no
+  checksum; truncation is the realistic failure, corruption-in-place is out of scope).
+  `nollama.py` re-checks the same invariant at load (`_verify_weights_integrity`) since
+  models can arrive without install.ps1 — a truncated/missing model fails with a
+  plain-English error, and the "Is another process using the NPU?" hint is suppressed
+  for that class of failure.
+- `download-model.ps1` — fetch/convert any HF model. PowerShell-style flags
+  (`-Convert -Weight int4 -Trust`), NOT GNU `--convert` (#19: the docs once showed
+  `--` syntax and users copy-pasted it; a catch-all param now prints the corrected
+  command when someone tries).
 - Tool calling: **GPU/iGPU + CPU** (gated by `_tools_supported`, i.e.
   `device_name in ("GPU","CPU")`); the **NPU is excluded** — it has a hard prompt cap and
   small NPU-class models can't drive agent loops, so when the NPU serves the request we

@@ -626,6 +626,14 @@ python nollama.py --model-dir ~/models/my-model --device GPU
 python nollama.py --gpu-model-dir ~/models/my-vlm
 ```
 
+Model folders are sanity-checked both at install time and at server start:
+the `openvino_model.bin` + `.xml` pair must be present, and the `.bin` must
+be at least as large as the `.xml` says it should be (byte-exact — catches
+interrupted downloads and half-synced copies). A broken folder is re-fetched
+by the installer, or refused at load with an error that says exactly what's
+missing — so if you assembled a model directory by hand and NoLlama rejects
+it, trust the message, not the folder listing.
+
 ### Finding newer/better models
 
 The model menus rot fast — new architectures appear monthly. The
