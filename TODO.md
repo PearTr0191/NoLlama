@@ -15,7 +15,8 @@ Status / open questions:
   reported budget and names the override in its "will NOT work" hint.
 - **Verify on this laptop** that flipping the override actually moves
   `GPU_DEVICE_TOTAL_MEM_SIZE` (expect 16.5 → ~27 GiB at 87% of 32 GB).
-  First attempt blocked: Intel Graphics Software crashed on launch.
+  Blocked so far: Intel Graphics Software crashes when toggling the
+  override (2026-08-04); retry after a reboot.
 - Is there a programmatic/registry way to set it (so install.ps1 could
   offer it, or at least link the setting)? Driver-version detection +
   a pointer in the install summary may be the realistic scope.

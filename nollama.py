@@ -238,6 +238,36 @@ def _dir_size_bytes(model_dir):
         return None
 
 
+def _verify_weights_integrity(model_dir):
+    """Byte-exact truncation check. The IR .xml records each weight blob's
+    offset+size into the .bin, so max(offset+size) is the exact minimum byte
+    count the .bin must have — catches a download/copy that lost even the
+    last 8 bytes (the IR carries no checksum, so corruption-in-place is out
+    of scope; truncation is the realistic failure). Returns an error string,
+    or None when intact / not checkable.
+    """
+    for base in ("openvino_model", "openvino_language_model"):
+        xml = os.path.join(model_dir, base + ".xml")
+        binf = os.path.join(model_dir, base + ".bin")
+        if not (os.path.isfile(xml) and os.path.isfile(binf)):
+            continue
+        try:
+            with open(xml, "rb") as f:
+                data = f.read()
+            need = max((int(m.group(1)) + int(m.group(2)) for m in
+                        re.finditer(rb'offset="(\d+)" size="(\d+)"', data)),
+                       default=0)
+            have = os.path.getsize(binf)
+        except (OSError, ValueError):
+            continue
+        if need and have < need:
+            return (f"{base}.bin is truncated: {have:,} bytes on disk but "
+                    f"{base}.xml expects at least {need:,}. Incomplete "
+                    f"download or copy — delete the model directory and "
+                    f"re-fetch it (install.ps1 / download-model.ps1).")
+    return None
+
+
 def _kv_bytes_per_token(model_dir):
     """KV-cache bytes per token from config.json geometry (K+V, fp16).
 
@@ -294,6 +324,15 @@ def explain_genai_error(e):
         # pool (seen with 30B-class models + big agent prompts, issue #21).
         return (f"{msg} — likely the KV-cache pool is too small for this "
                 f"prompt: raise --cache-size-gb (currently {PROMPT_CACHE_GB} GB)")
+    if "Could not find a model in the directory" in msg:
+        # read_model() found neither openvino_model.xml nor
+        # openvino_language_model.xml — usually an interrupted download that
+        # left the big .bin without its .xml descriptor (issue #17).
+        return (f"{msg} — the directory has no openvino_model.xml / "
+                f"openvino_language_model.xml. Incomplete download or "
+                f"conversion? If the directory is a link, check the link "
+                f"target's contents; re-run install.ps1 or download-model.ps1 "
+                f"to repair.")
     return msg
 
 
@@ -690,6 +729,9 @@ class DeviceSlot:
         self.model_type = "vlm" if vlm else "llm"
 
         print(f"  [{self.device_name}] Detected: {self.model_type.upper()} ({self.model_name})")
+        integrity_err = _verify_weights_integrity(model_dir)
+        if integrity_err:
+            raise RuntimeError(integrity_err)
         self._preflight_memory(vlm)
         print(f"  [{self.device_name}] Loading...", flush=True)
 
@@ -2260,8 +2302,11 @@ def _load_in_background(slot, model_dir, devices, port, ollama_port, banner_slot
         _prewarm_slot(slot)
     except Exception as e:
         slot.status = "error"
-        print(f"\n  [{slot.device_name}] ERROR: Failed to load model: {e}")
-        print(f"  Is another process using the {slot.device_name}?", flush=True)
+        print(f"\n  [{slot.device_name}] ERROR: Failed to load model: {explain_genai_error(e)}")
+        if not any(s in str(e) for s in ("Could not find a model", "is truncated")):
+            # Device-contention hint only where it's plausible — for a
+            # missing or truncated model it sends people chasing ghosts (#17).
+            print(f"  Is another process using the {slot.device_name}?", flush=True)
 
     # Print banner when all slots are done — only one thread wins
     with _banner_lock:

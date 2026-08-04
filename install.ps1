@@ -145,9 +145,14 @@ Write-Host ""
 
 $LocalModels = @()
 if (Test-Path $ModelsRoot) {
+    # Require the .bin + .xml pair: a folder with only the big weights file
+    # (interrupted download) would be offered as "Already on disk" and then
+    # fail at load with "Could not find a model in the directory" (#17).
     $LocalModels = @(Get-ChildItem -Path $ModelsRoot -Directory | Where-Object {
-        (Test-Path (Join-Path $_.FullName "openvino_language_model.bin")) -or
-        (Test-Path (Join-Path $_.FullName "openvino_model.bin"))
+        ((Test-Path (Join-Path $_.FullName "openvino_language_model.bin")) -and
+         (Test-Path (Join-Path $_.FullName "openvino_language_model.xml"))) -or
+        ((Test-Path (Join-Path $_.FullName "openvino_model.bin")) -and
+         (Test-Path (Join-Path $_.FullName "openvino_model.xml")))
     } | ForEach-Object {
         $vlmBin = Join-Path $_.FullName "openvino_language_model.bin"
         $llmBin = Join-Path $_.FullName "openvino_model.bin"
@@ -320,19 +325,35 @@ function Show-ModelMenu {
 
 function Test-ModelCacheValid {
     # A cache is valid only if the main weights .bin file exists AND is
-    # substantial (>100 MB). The previous "file exists" check let partial
-    # downloads sneak through: the XML descriptor + small tokenizer files
-    # complete quickly, but the multi-GB weights file may be 0 bytes or
-    # missing if the download was interrupted. Smallest real model in our
-    # registry (DeepSeek-1.5B INT4) is ~700 MB; tokenizer .bin files top
-    # out around 10 MB. 100 MB cleanly separates the two.
+    # substantial (>100 MB) AND its matching .xml descriptor exists. Partial
+    # downloads fail both ways: the XML + small tokenizer files complete
+    # quickly while the multi-GB weights file may be 0 bytes or missing —
+    # and the reverse (big .bin, no .xml) also happens and makes OpenVINO
+    # fail at load with "Could not find a model in the directory" (#17).
+    # Smallest real model in our registry (DeepSeek-1.5B INT4) is ~700 MB;
+    # tokenizer .bin files top out around 10 MB. 100 MB separates the two.
     param([string]$Path)
     if (-not (Test-Path $Path)) { return $false }
-    foreach ($bin in @("openvino_language_model.bin", "openvino_model.bin")) {
-        $file = Join-Path $Path $bin
-        if ((Test-Path $file) -and ((Get-Item $file).Length -gt 100MB)) {
-            return $true
+    foreach ($base in @("openvino_language_model", "openvino_model")) {
+        $bin = Join-Path $Path "$base.bin"
+        $xml = Join-Path $Path "$base.xml"
+        if (-not ((Test-Path $bin) -and ((Get-Item $bin).Length -gt 100MB) -and (Test-Path $xml))) {
+            continue
         }
+        # Truncation check: the IR .xml records each weight blob's
+        # offset+size into the .bin, so max(offset+size) is the exact
+        # minimum byte count the .bin must have. Catches a download that
+        # lost even the last few bytes; a truncated cache is re-fetched.
+        $need = [int64]0
+        foreach ($m in [regex]::Matches((Get-Content $xml -Raw), 'offset="(\d+)" size="(\d+)"')) {
+            $end = [int64]$m.Groups[1].Value + [int64]$m.Groups[2].Value
+            if ($end -gt $need) { $need = $end }
+        }
+        if ($need -gt 0 -and (Get-Item $bin).Length -lt $need) {
+            Write-Host "  $base.bin in $Path is truncated ($((Get-Item $bin).Length) of $need bytes) - re-fetching." -ForegroundColor Yellow
+            continue
+        }
+        return $true
     }
     return $false
 }
