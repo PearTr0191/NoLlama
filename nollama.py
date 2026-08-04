@@ -16,6 +16,7 @@ Usage:
 
 import argparse
 import base64
+import hashlib
 import io
 import itertools
 import json
@@ -178,6 +179,84 @@ def parse_messages(messages, max_dim):
 
 
 # ---------------------------------------------------------------------------
+# Memory preflight — warn (never block) when a model won't fit its device
+# ---------------------------------------------------------------------------
+
+def _system_ram_bytes():
+    """Total physical RAM in bytes. None if it can't be determined."""
+    try:
+        if os.name == "nt":
+            import ctypes
+            class _MemStatus(ctypes.Structure):
+                _fields_ = ([("dwLength", ctypes.c_ulong),
+                             ("dwMemoryLoad", ctypes.c_ulong)] +
+                            [(n, ctypes.c_ulonglong) for n in (
+                                "ullTotalPhys", "ullAvailPhys",
+                                "ullTotalPageFile", "ullAvailPageFile",
+                                "ullTotalVirtual", "ullAvailVirtual",
+                                "ullAvailExtendedVirtual")])
+            st = _MemStatus(dwLength=ctypes.sizeof(_MemStatus))
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(st)):
+                return int(st.ullTotalPhys)
+        else:
+            with open("/proc/meminfo") as f:
+                for line in f:
+                    if line.startswith("MemTotal:"):
+                        return int(line.split()[1]) * 1024
+    except Exception:
+        pass
+    return None
+
+
+def _device_mem_bytes(device_name, device_id):
+    """Memory budget for a device, in bytes. None if unknown.
+
+    GPU: ask the driver — on Windows iGPUs the reported figure already
+    reflects the OS shared-memory policy (default ~half of RAM) and Intel's
+    "Shared GPU Memory Override" driver setting, so it is the real budget,
+    not a guess. CPU: total system RAM.
+    """
+    if device_name == "GPU":
+        try:
+            return int(ov.Core().get_property(device_id, "GPU_DEVICE_TOTAL_MEM_SIZE"))
+        except Exception:
+            return None
+    if device_name == "CPU":
+        return _system_ram_bytes()
+    return None
+
+
+def _dir_size_bytes(model_dir):
+    """Total size of a model directory (≈ weight bytes). None on failure."""
+    try:
+        total = 0
+        for root, _dirs, files in os.walk(model_dir):
+            for fn in files:
+                total += os.path.getsize(os.path.join(root, fn))
+        return total or None
+    except OSError:
+        return None
+
+
+def _kv_bytes_per_token(model_dir):
+    """KV-cache bytes per token from config.json geometry (K+V, fp16).
+
+    E.g. Qwen2.5-Coder-7B (28 layers x 4 KV heads x 128 head-dim) ≈ 57 KB/tok;
+    Qwen3-Coder-30B ≈ 96 KB/tok. None when the geometry can't be read.
+    """
+    try:
+        with open(os.path.join(model_dir, "config.json")) as f:
+            cfg = json.load(f)
+        layers = cfg["num_hidden_layers"]
+        heads = cfg["num_attention_heads"]
+        kv_heads = cfg.get("num_key_value_heads") or heads
+        head_dim = cfg.get("head_dim") or cfg["hidden_size"] // heads
+        return 2 * layers * kv_heads * head_dim * 2
+    except Exception:
+        return None
+
+
+# ---------------------------------------------------------------------------
 # Response extraction
 # ---------------------------------------------------------------------------
 
@@ -192,6 +271,30 @@ def extract_text(result):
                 return val[0].strip() if val else ""
             return val.strip()
     return str(result).strip()
+
+
+def extract_perf(result):
+    """Pull (ttft_ms, gen_ms) off a genai result. Returns (None, None) when the
+    build or pipeline doesn't provide perf_metrics — never raises.
+    """
+    pm = getattr(result, "perf_metrics", None)
+    if pm is None:
+        return None, None
+    try:
+        return pm.get_ttft().mean, pm.get_generate_duration().mean
+    except Exception:
+        return None, None
+
+
+def explain_genai_error(e):
+    """Map opaque OpenVINO GenAI runtime errors to actionable messages."""
+    msg = str(e)
+    if "unfinished GenerationStatus" in msg:
+        # Continuous-batching scheduler couldn't fit the sequence in the KV
+        # pool (seen with 30B-class models + big agent prompts, issue #21).
+        return (f"{msg} — likely the KV-cache pool is too small for this "
+                f"prompt: raise --cache-size-gb (currently {PROMPT_CACHE_GB} GB)")
+    return msg
 
 
 # ---------------------------------------------------------------------------
@@ -575,6 +678,8 @@ class DeviceSlot:
         self._cancel = threading.Event()  # signal to stop generation
         self.last_used = time.time()     # for idle-unload watchdog
         self.model_dir = None            # remembered so we can reload after unload
+        self.last_ttft_ms = None         # last request's time-to-first-token (prefix-cache hit ≈ low)
+        self.prewarmed = False           # did _prewarm_slot succeed for this load
 
     def load(self, model_dir):
         """Load model, auto-detecting VLM vs LLM."""
@@ -585,6 +690,7 @@ class DeviceSlot:
         self.model_type = "vlm" if vlm else "llm"
 
         print(f"  [{self.device_name}] Detected: {self.model_type.upper()} ({self.model_name})")
+        self._preflight_memory(vlm)
         print(f"  [{self.device_name}] Loading...", flush=True)
 
         if vlm:
@@ -620,6 +726,43 @@ class DeviceSlot:
                     self.pipe = ovg.LLMPipeline(str(model_dir), device=self.device_id)
             else:
                 self.pipe = ovg.LLMPipeline(str(model_dir), device=self.device_id)
+
+    def _preflight_memory(self, vlm):
+        """Sanity-check model weights + KV pool against the device's memory
+        budget before loading. Warns and keeps going — the numbers are
+        estimates, and on 16 GB cards OpenVINO's silent CPU fallback (or a
+        'Got unfinished GenerationStatus' abort mid-request) is far worse
+        than a false-positive warning here.
+        """
+        gib = 2 ** 30
+        mem = _device_mem_bytes(self.device_name, self.device_id)
+        weights = _dir_size_bytes(self.model_dir)
+        if not mem or not weights:
+            return  # can't estimate — stay quiet rather than guess
+        kv_pool = (PROMPT_CACHE_GB * gib
+                   if PROMPT_CACHE and not vlm and self.device_name in ("GPU", "CPU")
+                   else 0)
+        need = (weights + kv_pool) * 1.1  # ~10% runtime/activation overhead
+        if need > mem:
+            hint = ("use a smaller quant or lower --cache-size-gb"
+                    if self.device_name == "CPU" else
+                    "raise the iGPU budget (Intel Graphics Software -> Shared GPU "
+                    "Memory Override), use a smaller quant, or lower --cache-size-gb")
+            print(f"  [{self.device_name}] WARNING: model (~{weights / gib:.1f} GB)"
+                  f"{f' + KV pool ({kv_pool // gib} GB)' if kv_pool else ''} needs "
+                  f"~{need / gib:.1f} GB but the device budget is {mem / gib:.1f} GB "
+                  f"— this will likely NOT work ({hint})", flush=True)
+        if kv_pool:
+            per_tok = _kv_bytes_per_token(self.model_dir)
+            if per_tok:
+                capacity = kv_pool // per_tok
+                line = (f"  [{self.device_name}] KV pool {PROMPT_CACHE_GB} GB ~ "
+                        f"{capacity // 1000}k tokens for this model "
+                        f"({per_tok // 1024} KB/token)")
+                if capacity < 32768:
+                    line += (" — agent prompts (20k+ tokens) will exhaust it; "
+                             "raise --cache-size-gb")
+                print(line, flush=True)
 
     def warmup(self):
         self.status = "warming_up"
@@ -689,6 +832,9 @@ class DeviceSlot:
         with self.lock:
             result = self.pipe.generate(history, gen)
             self.last_used = time.time()
+        ttft_ms, _ = extract_perf(result)
+        if ttft_ms is not None:
+            self.last_ttft_ms = ttft_ms
         return extract_text(result)
 
     def cancel(self):
@@ -814,7 +960,7 @@ class DeviceSlot:
             except Exception as e:
                 gen_error[0] = e
                 print(f"{datetime.now():%H:%M:%S} !! [{self.device_name}] "
-                      f"generate error: {e}", flush=True)
+                      f"generate error: {explain_genai_error(e)}", flush=True)
             finally:
                 token_queue.put(None)
 
@@ -851,6 +997,9 @@ class DeviceSlot:
                     continue
                 if token is None:
                     break
+                if token_count == 0:
+                    # Wall-clock TTFT: prefill is over when the first token lands.
+                    self.last_ttft_ms = (time.perf_counter() - t0) * 1000
                 token_count += 1
                 chunk = {
                     "id": completion_id, "object": "chat.completion.chunk",
@@ -867,7 +1016,7 @@ class DeviceSlot:
                     "id": completion_id, "object": "chat.completion.chunk",
                     "created": created, "model": self.model_name,
                     "choices": [{"index": 0, "delta": {
-                        "content": f"\n[error: {gen_error[0]}]"
+                        "content": f"\n[error: {explain_genai_error(gen_error[0])}]"
                     }, "finish_reason": "error"}],
                 }
                 yield f"data: {json.dumps(err_chunk)}\n\n"
@@ -887,8 +1036,10 @@ class DeviceSlot:
         elapsed = time.perf_counter() - t0
         tps = token_count / elapsed if elapsed > 0 else 0
         tag = " (cancelled)" if was_cancelled else (" (error)" if gen_error[0] else "")
+        ttft = (f", TTFT {self.last_ttft_ms:.0f}ms" if token_count and
+                self.last_ttft_ms is not None else "")
         print(f"{datetime.now():%H:%M:%S} -> [{self.device_name}] "
-              f"{token_count} tokens in {elapsed:.1f}s ({tps:.1f} tok/s){tag}",
+              f"{token_count} tokens in {elapsed:.1f}s ({tps:.1f} tok/s{ttft}){tag}",
               flush=True)
 
     @property
@@ -900,6 +1051,9 @@ class DeviceSlot:
             "device": self.device_full,
             "device_name": self.device_name,   # canonical NPU/GPU/CPU (routing/checks)
             "tools": _tools_supported(self),    # can this slot drive an agent loop?
+            "prewarmed": self.prewarmed,        # did the --prewarm prefill succeed
+            "last_ttft_ms": (round(self.last_ttft_ms)
+                             if self.last_ttft_ms is not None else None),
         }
 
 
@@ -1100,12 +1254,13 @@ def _sse_tool_stream(slot, raw_messages, gen, tools, completion_id, created, t0)
 
     elapsed = time.perf_counter() - t0
     if result.get("error") is not None:
+        err = explain_genai_error(result["error"])
         print(f"{datetime.now():%H:%M:%S} !! [{slot.device_name}] "
-              f"LLM error: {result['error']}", flush=True)
+              f"LLM error: {err}", flush=True)
         yield ("data: " + json.dumps({
             "id": completion_id, "object": "chat.completion.chunk",
             "created": created, "model": slot.model_name,
-            "choices": [{"index": 0, "delta": {"content": f"\n[error: {result['error']}]"},
+            "choices": [{"index": 0, "delta": {"content": f"\n[error: {err}]"},
                          "finish_reason": "error"}],
         }) + "\n\n")
         yield "data: [DONE]\n\n"
@@ -1113,9 +1268,11 @@ def _sse_tool_stream(slot, raw_messages, gen, tools, completion_id, created, t0)
 
     text = result.get("text", "")
     n_words = len(text.split())
+    ttft = (f", TTFT {slot.last_ttft_ms:.0f}ms"
+            if slot.last_ttft_ms is not None else "")
     print(f"{datetime.now():%H:%M:%S} -> [{slot.device_name}] "
           f"~{n_words} tokens in {elapsed:.1f}s "
-          f"({n_words / max(elapsed, 1e-6):.1f} tok/s)", flush=True)
+          f"({n_words / max(elapsed, 1e-6):.1f} tok/s{ttft})", flush=True)
 
     text, tool_calls = parse_tool_calls(text, tools)
     if tool_calls:
@@ -1197,7 +1354,9 @@ def _maybe_capture_prewarm(raw_messages):
     if len(sys_text) < PREWARM_MIN_CHARS:
         return
     global _prewarm_hash
-    h = hash(sys_text)
+    # sha256, not builtin hash(): hash() is PYTHONHASHSEED-salted per process,
+    # which forced one redundant rewrite after every restart.
+    h = hashlib.sha256(sys_text.encode("utf-8")).hexdigest()
     if h == _prewarm_hash:
         return
     # Save system + the first user turn — enough to cache the shared prefix.
@@ -1236,11 +1395,13 @@ def _prewarm_slot(slot):
         gen.do_sample = False
         t0 = time.perf_counter()
         slot.generate_llm(raw_messages, gen)  # prefills -> populates prefix cache
+        slot.prewarmed = True
         print(f"  [{slot.device_name}] pre-warmed prompt cache from "
               f"{os.path.basename(PREWARM_FILE)} ({time.perf_counter() - t0:.1f}s)",
               flush=True)
     except Exception as e:
-        print(f"  [{slot.device_name}] pre-warm failed: {e}", flush=True)
+        slot.prewarmed = False
+        print(f"  [{slot.device_name}] pre-warm failed: {explain_genai_error(e)}", flush=True)
 
 
 # ---------------------------------------------------------------------------
@@ -1284,8 +1445,16 @@ def health():
         devices[primary.device_name.lower()] = primary.info
     if secondary and secondary.status != "not_configured":
         devices[secondary.device_name.lower()] = secondary.info
+    # prompt_cache stays a bare bool — start-openclaw.ps1's health check
+    # truth-tests it; the details live in prompt_cache_info (per-slot TTFT
+    # and prewarm state are in each device's info block).
     result = {"status": overall_status(), "devices": devices,
-              "prompt_cache": PROMPT_CACHE}
+              "prompt_cache": PROMPT_CACHE,
+              "prompt_cache_info": {
+                  "enabled": PROMPT_CACHE,
+                  "pool_gb": PROMPT_CACHE_GB,
+                  "prewarm_file": PREWARM_FILE,
+              }}
     if whisper_slot and whisper_slot.status != "not_configured":
         result["whisper"] = whisper_slot.info
     return jsonify(result)
@@ -1509,13 +1678,16 @@ def chat_completions():
     try:
         text = slot.generate_llm(raw_messages, gen)
     except Exception as e:
-        print(f"{datetime.now():%H:%M:%S} !! [{slot.device_name}] LLM error: {e}", flush=True)
-        return openai_error(f"Inference failed: {e}", "server_error", 500)
+        err = explain_genai_error(e)
+        print(f"{datetime.now():%H:%M:%S} !! [{slot.device_name}] LLM error: {err}", flush=True)
+        return openai_error(f"Inference failed: {err}", "server_error", 500)
 
     elapsed = time.perf_counter() - t0
     n_words = len(text.split())
+    ttft = (f", TTFT {slot.last_ttft_ms:.0f}ms"
+            if slot.last_ttft_ms is not None else "")
     print(f"{datetime.now():%H:%M:%S} -> [{slot.device_name}] "
-          f"~{n_words} tokens in {elapsed:.1f}s ({n_words / max(elapsed, 1e-6):.1f} tok/s)",
+          f"~{n_words} tokens in {elapsed:.1f}s ({n_words / max(elapsed, 1e-6):.1f} tok/s{ttft})",
           flush=True)
 
     tool_calls = []
@@ -1688,6 +1860,13 @@ def ollama_chat():
     except Exception as e:
         return jsonify({"error": f"Failed to reload model: {e}"}), 500
 
+    # Capture a big agent prompt so the next startup can pre-warm it (no-op
+    # unless --prewarm is set). Mirrors the OpenAI path at chat_completions —
+    # clients on the plain Ollama API (pre-0.53 Copilot, Open WebUI, ...)
+    # reach us through this handler, not /v1.
+    if slot.model_type == "llm":
+        _maybe_capture_prewarm(raw_messages)
+
     # Build generation config
     gen = ovg.GenerationConfig()
     gen.max_new_tokens = max_tokens
@@ -1733,11 +1912,13 @@ def ollama_chat():
     try:
         text = slot.generate_llm(raw_messages, gen)
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": explain_genai_error(e)}), 500
 
     elapsed = time.perf_counter() - t0
+    ttft = (f", TTFT {slot.last_ttft_ms:.0f}ms"
+            if slot.last_ttft_ms is not None else "")
     print(f"{datetime.now():%H:%M:%S} -> [{slot.device_name}] [Ollama] "
-          f"~{len(text.split())} tokens in {elapsed:.1f}s", flush=True)
+          f"~{len(text.split())} tokens in {elapsed:.1f}s{ttft}", flush=True)
 
     message = {"role": "assistant", "content": text}
     if tools_active:
@@ -1791,7 +1972,7 @@ def _ollama_stream_chat(slot, raw_messages, gen, t0):
                 slot.last_used = time.time()
         except Exception as e:
             print(f"{datetime.now():%H:%M:%S} !! [{slot.device_name}] [Ollama] "
-                  f"generate error: {e}", flush=True)
+                  f"generate error: {explain_genai_error(e)}", flush=True)
         finally:
             token_queue.put(None)
 
@@ -1806,6 +1987,9 @@ def _ollama_stream_chat(slot, raw_messages, gen, t0):
                 break
             if token is None:
                 break
+            if token_count == 0:
+                # Wall-clock TTFT: prefill is over when the first token lands.
+                slot.last_ttft_ms = (time.perf_counter() - t0) * 1000
             token_count += 1
             yield json.dumps({
                 "model": slot.model_name,
@@ -1826,8 +2010,10 @@ def _ollama_stream_chat(slot, raw_messages, gen, t0):
     finally:
         slot._cancel.set()
 
+    ttft = (f", TTFT {slot.last_ttft_ms:.0f}ms" if token_count and
+            slot.last_ttft_ms is not None else "")
     print(f"{datetime.now():%H:%M:%S} -> [{slot.device_name}] [Ollama] "
-          f"{token_count} tokens in {elapsed:.1f}s ({tps:.1f} tok/s)", flush=True)
+          f"{token_count} tokens in {elapsed:.1f}s ({tps:.1f} tok/s{ttft})", flush=True)
 
 
 @ollama_app.route("/api/generate", methods=["POST"])
@@ -1942,7 +2128,7 @@ def _ollama_stream_generate(slot, raw_messages, gen, t0):
                 slot.last_used = time.time()
         except Exception as e:
             print(f"{datetime.now():%H:%M:%S} !! [{slot.device_name}] [Ollama] "
-                  f"generate error: {e}", flush=True)
+                  f"generate error: {explain_genai_error(e)}", flush=True)
         finally:
             token_queue.put(None)
 
@@ -2140,7 +2326,8 @@ def parse_args():
                    help="Device for Whisper: CPU or GPU (default: CPU)")
     p.add_argument("--idle-timeout", type=int, default=1800,
                    help="Change idle-unload timeout in seconds "
-                        "(default: 1800 = 30 min). Use 0 to disable unloading.")
+                        "(default: 1800 = 30 min). Use 0 to disable unloading "
+                        "(recommended for agent use; also auto-enables --prewarm).")
     p.add_argument("--debug", action="store_true",
                    help="Log every inbound API request (method, path, User-Agent, body)")
     p.add_argument("--vscode-compat", action="store_true",
@@ -2156,7 +2343,10 @@ def parse_args():
     p.add_argument("--prewarm", default=None, metavar="FILE",
                    help="Prefill a saved agent prompt at startup so the first turn is a "
                         "cache hit (no cold-prefill stall). The file auto-populates from the "
-                        "first big prompt served, so: run once, then restart with --prewarm.")
+                        "first big prompt served, so: run once, then restart with --prewarm. "
+                        "Auto-enabled (as prewarm-<port>.json) when --idle-timeout is 0.")
+    p.add_argument("--no-prewarm", action="store_true",
+                   help="Disable the automatic prewarm that --idle-timeout 0 turns on.")
     return p.parse_args()
 
 
@@ -2171,7 +2361,16 @@ def main():
     vscode_compat = args.vscode_compat
     PROMPT_CACHE = not args.no_prompt_cache
     PROMPT_CACHE_GB = args.cache_size_gb
-    PREWARM_FILE = os.path.expanduser(args.prewarm) if args.prewarm else None
+    if args.prewarm:
+        PREWARM_FILE = os.path.expanduser(args.prewarm)
+    elif args.idle_timeout == 0 and not args.no_prewarm and PROMPT_CACHE:
+        # Agent/server mode (--idle-timeout 0 keeps models loaded forever) is
+        # exactly where prewarm pays off — and the idle unload that would
+        # throw the warmed cache away can't happen, so turn it on. Port-scoped
+        # filename so two instances on one install don't overwrite each other.
+        PREWARM_FILE = os.path.join(SCRIPT_DIR, f"prewarm-{args.port}.json")
+    else:
+        PREWARM_FILE = None
 
     # Quiet Flask/Werkzeug startup noise: kills the "Serving Flask app" /
     # "Debug mode: off" / "Running on http://..." / "Press CTRL+C to quit"
@@ -2291,12 +2490,22 @@ def main():
     # Idle watchdog — unload models after inactivity
     if args.idle_timeout > 0:
         print(f"  Idle unload after {args.idle_timeout}s of inactivity", flush=True)
+        if PREWARM_FILE:
+            # The prefix cache lives in the pipeline; unload drops both and the
+            # reload path doesn't re-warm (a synchronous re-warm would stall
+            # the triggering request for the whole prefill).
+            print(f"  WARNING: --prewarm + idle unload: the warmed cache is lost "
+                  f"when the model idle-unloads and not rebuilt until restart. "
+                  f"Use --idle-timeout 0 to keep it.", flush=True)
         watchdog = threading.Thread(
             target=_idle_watchdog,
             args=(all_slots, args.idle_timeout),
             daemon=True,
         )
         watchdog.start()
+    elif PREWARM_FILE and not args.prewarm:
+        print(f"  Prewarm auto-enabled (--idle-timeout 0): "
+              f"{os.path.basename(PREWARM_FILE)} (--no-prewarm to disable)", flush=True)
 
     # Suppress Flask's default "Serving Flask app" banner — we have our own
     import logging

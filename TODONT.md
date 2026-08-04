@@ -57,10 +57,14 @@ for CPU-only users, and don't invest further in it.
   already needs to recognize six native formats (Qwen3-Coder XML, Hermes,
   bare `<function=>`, Mistral, Llama, DeepSeek) precisely because models
   ignore our prompt — that's a maintenance treadmill Ollama doesn't have.
-- It contradicts the project's stated scope. NoLlama exists for the Intel
+- ~~It contradicts the project's stated scope. NoLlama exists for the Intel
   **NPU**; GPU/CPU are explicitly provisional (README "Roadmap note"),
   kept only while OpenVINO is meaningfully faster. Advertising CPU dilutes
-  the one claim nothing else makes.
+  the one claim nothing else makes.~~ *(Update 2026-08-04: the provisional
+  stance is reversed — GPU/CPU are committed long-term, since no
+  OpenVINO-class Ollama Intel backend is coming and most users run agents
+  (OpenClaw) on GPU/CPU. This argument no longer applies; the entry's
+  verdict still stands on the ecosystem-maturity argument above.)*
 - Coexistence is free: Ollama keeps 11434, and NoLlama's port check
   (`nollama.py:2193`) already detects that and disables its own Ollama
   shim rather than failing. There is no integration cost to pay.

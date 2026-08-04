@@ -207,14 +207,18 @@ time-to-first-token. Two caveats that matter in practice:
 - Ollama can't use the **NPU** at all, and has no local **vision** model
   on Intel — both are NoLlama-only.
 
-> **Roadmap note — GPU/CPU support is provisional.** NoLlama's reason to
-> exist is the Intel **NPU** (which Ollama doesn't support). The GPU/CPU
-> paths are kept only while OpenVINO is meaningfully faster than Ollama
-> there. **As/when Ollama's Intel GPU (and CPU) performance catches up to
-> OpenVINO, GPU/CPU support will be removed from NoLlama** and it will
-> become NPU-only — at that point Ollama is the better tool for GPU/CPU
-> and there's no reason to duplicate it. Today (Ollama ~1.6× slower on
-> GPU decode, CPU-by-default), that bar isn't met, so GPU/CPU stay.
+> **Roadmap note — GPU/CPU support is here to stay** *(updated 2026-08:
+> this reverses the earlier "provisional" stance)*. NoLlama's original
+> reason to exist is the Intel **NPU** (which Ollama doesn't support), and
+> the plan was to drop GPU/CPU once Ollama's Intel performance caught up.
+> That hasn't happened and isn't on the horizon: Ollama's Intel path runs
+> through a non-OpenVINO shim and remains much slower, while most real
+> NoLlama users drive coding agents (OpenClaw, Copilot) on the GPU/CPU
+> path. So GPU/CPU — and with them tool calling, prefix caching, and
+> prewarm — are supported for the foreseeable future. If you outgrow a
+> single-user local server (multi-user, production serving of 30B+
+> models), the step up is [OpenVINO Model Server](https://github.com/openvinotoolkit/model_server)
+> — same runtime underneath, built for that job.
 
 ### Benchmark (Core Ultra 9 285K, RTX 5090) — desktop, DDR5
 
@@ -346,8 +350,27 @@ python nollama.py --no-prompt-cache     # disable prefix caching
 # Pre-warm the cache at startup so the FIRST agent turn is fast too (not just
 # turn 2+). The file auto-populates from the first big prompt served, so the
 # workflow is: run once, then restart with --prewarm to skip the cold prefill.
+# With --idle-timeout 0 this is automatic (as prewarm-<port>.json; opt out
+# with --no-prewarm) — combining --prewarm with idle unload gets a warning,
+# because the warmed cache is thrown away when the model idle-unloads.
 python nollama.py --prewarm prewarm.json
 ```
+
+**Size the KV pool for your model.** The pool must hold the whole
+conversation: bytes-per-token scale with the model's layer/head geometry
+(~56 KB/token for a 7B coder, ~96 KB/token for Qwen3-Coder-30B — the
+default 2 GB is ~37k and ~21k tokens respectively). Too small doesn't just
+evict cache — generation on a big agent prompt **fails outright**
+(`Got unfinished GenerationStatus`, see issue #21); with a 30B-class model
+start at `--cache-size-gb 8` and go up. NoLlama now does the math for you
+at startup: it logs the pool's token capacity for the loaded model, warns
+when agent prompts would exhaust it, and warns when model + pool exceed
+the device's memory budget entirely. On Core Ultra iGPUs that budget is
+~half of system RAM by default — raise it with Intel Graphics Software's
+"Shared GPU Memory Override" (driver 101.6987+). Per-request log lines
+include TTFT, so a prefix-cache hit (sub-second) vs a cold prefill
+(seconds-to-minutes) is visible directly; `/health` reports the cache
+config and each slot's last TTFT.
 
 ### Idle unload
 
@@ -358,7 +381,10 @@ first response (~30-60s for an 8B model on NPU). The web UI shows
 "Reloading model..." while it waits.
 
 Change with `--idle-timeout <seconds>`. Use `0` to keep models loaded
-forever (the old behavior).
+forever (the old behavior) — recommended for agent use: it also
+auto-enables `--prewarm`, and the warmed prefix cache survives (an idle
+unload discards it until the next restart, which is why mixing
+`--prewarm` with idle unload prints a warning).
 
 `/health` reports `idle_unloaded` slots; the overall status stays
 `ready` because requests can still be served (with a reload).

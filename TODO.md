@@ -1,5 +1,29 @@
 # TODO
 
+## Make more memory available to the iGPU (2026-08-04)
+
+By default Windows budgets the iGPU ~half of system RAM (the Arc 140V on a
+32 GB laptop reports a 16.5 GB budget via `GPU_DEVICE_TOTAL_MEM_SIZE`).
+Intel's driver 32.0.101.6987+ added **"Shared GPU Memory Override"** in the
+Intel Graphics Software app (Core Ultra series 1/2): default ~57%, up to
+~87% of RAM — explicitly marketed for local AI. That's the difference
+between "30B model won't fit" and "fits with a fat KV pool".
+
+Status / open questions:
+
+- The memory preflight (`_preflight_memory`) already reads the driver's
+  reported budget and names the override in its "will NOT work" hint.
+- **Verify on this laptop** that flipping the override actually moves
+  `GPU_DEVICE_TOTAL_MEM_SIZE` (expect 16.5 → ~27 GiB at 87% of 32 GB).
+  First attempt blocked: Intel Graphics Software crashed on launch.
+- Is there a programmatic/registry way to set it (so install.ps1 could
+  offer it, or at least link the setting)? Driver-version detection +
+  a pointer in the install summary may be the realistic scope.
+- Document in README once verified (currently one line in the KV-pool
+  section).
+
+---
+
 ## Spinoff idea: claude-code CLI as Ollama backend (2026-05-26)
 
 **Not part of NoLlama.** Separate repo if pursued. NoLlama is local-Intel

@@ -17,8 +17,25 @@ OpenAI-compatible LLM/VLM server for Intel hardware. NPU-first.
   plain pipeline (NPU has no CB path; it keeps MAX_PROMPT_LEN). Falls back to the plain
   pipeline with a warning if a device can't build the CB backend. `--prewarm <file>`
   prefills a saved agent prompt at startup (the file auto-captures the first big prompt
-  served via `_maybe_capture_prewarm`, so: run once → restart with `--prewarm`) so even the
-  first turn is a cache hit instead of a cold prefill that can trip a client's idle watchdog.
+  served via `_maybe_capture_prewarm` — on both the OpenAI and Ollama chat paths — so: run
+  once → restart with `--prewarm`) so even the first turn is a cache hit instead of a cold
+  prefill that can trip a client's idle watchdog. Prewarm is auto-enabled as
+  `prewarm-<port>.json` when `--idle-timeout 0` (opt out: `--no-prewarm`); combining
+  `--prewarm` with idle unload warns, since unload discards the warmed cache and the reload
+  path deliberately does NOT re-warm (a synchronous re-warm would stall the triggering
+  request pre-SSE and trip the client watchdogs the heartbeat exists to defeat).
+- Observability: per-request log lines include TTFT (streaming: wall-clock to first token;
+  non-streaming: `perf_metrics` via `extract_perf`) — a prefix-cache hit is sub-second vs a
+  cold multi-second/minute prefill, so hits/misses are visible without instrumentation.
+  `/health` has `prompt_cache_info` (pool size, prewarm file) + per-slot `last_ttft_ms` and
+  `prewarmed`; `prompt_cache` stays a bare bool (start-openclaw.ps1 truth-tests it).
+- Memory preflight at load (`_preflight_memory`): warns (never blocks) when weights + KV
+  pool exceed the device budget (GPU: `GPU_DEVICE_TOTAL_MEM_SIZE`, which reflects Windows'
+  ~half-RAM iGPU policy and Intel's "Shared GPU Memory Override" driver setting; CPU: total
+  RAM) and logs the KV pool's token capacity from `config.json` geometry (~56 KB/token for a
+  7B coder, ~96 KB for 30B — a too-small pool hard-fails generation with
+  `Got unfinished GenerationStatus`, issue #21; `explain_genai_error` annotates that error
+  with a `--cache-size-gb` hint wherever it surfaces).
 - Whisper: WhisperSlot + WhisperPipeline for STT, `POST /v1/audio/transcriptions`, CPU or GPU
 - OpenVINO GenAI may unify VLM/LLMPipeline — when that happens, simplify the dual-pipeline routing
 - Routing: images go to GPU, text goes to NPU (or GPU if no NPU)

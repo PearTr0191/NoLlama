@@ -528,7 +528,7 @@ switch ($useKey) {
             -Note "GPU is usually faster; CPU often wins on strong desktops / weak iGPUs."
         $loc = @($LocalModels | Where-Object { $_.Type -eq "llm" })
         $sel = Show-ModelMenu -Title "Coding agent model ($dev) - OpenClaw / Copilot ready" -RegistryModels $coders -LocalModels $loc
-        if ($sel) { Install-Primary $sel $dev; $StartArgs += @("--prewarm", "prewarm.json", "--vscode-compat"); $isAgent = $true }
+        if ($sel) { Install-Primary $sel $dev; $StartArgs += @("--prewarm", "prewarm.json", "--vscode-compat", "--idle-timeout", "0"); $isAgent = $true }
     }
     "vision" {
         $loc = @($LocalModels | Where-Object { $_.Type -eq "vlm" })
@@ -543,7 +543,7 @@ switch ($useKey) {
             $cloc = @($LocalModels | Where-Object { $_.Type -eq "llm" -and $_.Name -ne $chatSel.Name })
             $coderSel = Show-ModelMenu -Title "Coding agent model (GPU) - OpenClaw / Copilot ready" -RegistryModels $coders -LocalModels $cloc -AllowSkip $true
             if ($coderSel -and (Install-Model -Selected $coderSel -TargetDir $GpuModelDir)) {
-                $StartArgs += @("--gpu-model-dir", "gpu-model", "--prewarm", "prewarm.json", "--vscode-compat"); $isAgent = $true
+                $StartArgs += @("--gpu-model-dir", "gpu-model", "--prewarm", "prewarm.json", "--vscode-compat", "--idle-timeout", "0"); $isAgent = $true
             }
         }
     }
