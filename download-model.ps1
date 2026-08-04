@@ -118,9 +118,15 @@ if ($Convert) {
         Write-Host ""
         Write-Host "ERROR: Conversion failed." -ForegroundColor Red
         Write-Host "  Common fixes:" -ForegroundColor Yellow
-        Write-Host "    - Add --trust if the model needs trust-remote-code" -ForegroundColor Yellow
+        Write-Host "    - Add -Trust if the model needs trust-remote-code" -ForegroundColor Yellow
         Write-Host "    - Check that optimum-intel is installed: pip install optimum[openvino]" -ForegroundColor Yellow
         Write-Host "    - Some architectures aren't supported yet by optimum-intel" -ForegroundColor Yellow
+        Write-Host "    - 'Maximum required is X, got: Y': transformers is too new for this" -ForegroundColor Yellow
+        Write-Host "      architecture's exporter. In the venv: pip install `"transformers==X`"" -ForegroundColor Yellow
+        Write-Host "      (the version the error names), then rerun." -ForegroundColor Yellow
+        Write-Host "    - 'DefaultCPUAllocator: not enough memory': conversion holds the full-" -ForegroundColor Yellow
+        Write-Host "      precision model (MoE models: plus fp32 expert copies) in memory." -ForegroundColor Yellow
+        Write-Host "      Raise the Windows pagefile (commit limit) and reboot, then rerun." -ForegroundColor Yellow
         exit 1
     }
 } else {
