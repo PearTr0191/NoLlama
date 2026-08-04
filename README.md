@@ -612,11 +612,11 @@ Use `download-model.ps1` to grab any HuggingFace model:
 # Pre-exported OpenVINO model (just download)
 .\download-model.ps1 OpenVINO/Qwen3-8B-int4-cw-ov
 
-# Convert a HuggingFace model to OpenVINO
-.\download-model.ps1 Qwen/Qwen2.5-VL-3B-Instruct --convert --weight int8
+# Convert a HuggingFace model to OpenVINO (PowerShell flags: single dash)
+.\download-model.ps1 Qwen/Qwen2.5-VL-3B-Instruct -Convert -Weight int8
 
 # With trust-remote-code (some models require this)
-.\download-model.ps1 Qwen/Qwen2.5-VL-3B-Instruct --convert --weight int4 --trust
+.\download-model.ps1 Qwen/Qwen2.5-VL-3B-Instruct -Convert -Weight int4 -Trust
 ```
 
 Models download to `~/models/<name>/`. Point NoLlama at them:

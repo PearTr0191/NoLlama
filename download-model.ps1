@@ -1,14 +1,14 @@
 #requires -Version 7.0
 # download-model.ps1 — Download or convert any HuggingFace model for NoLlama
 #
-# Usage:
+# Usage (PowerShell parameters take a SINGLE dash):
 #     .\download-model.ps1 OpenVINO/Qwen3-8B-int4-cw-ov          # pre-exported, just download
-#     .\download-model.ps1 Qwen/Qwen2.5-VL-3B-Instruct --convert --weight int8
-#     .\download-model.ps1 Qwen/Qwen2.5-VL-3B-Instruct --convert --weight int4 --trust
+#     .\download-model.ps1 Qwen/Qwen2.5-VL-3B-Instruct -Convert -Weight int8
+#     .\download-model.ps1 Qwen/Qwen2.5-VL-3B-Instruct -Convert -Weight int4 -Trust
 #     .\download-model.ps1 some-org/gated-model -HfToken hf_xxx  # auth for gated/private models
 #
 # Downloads to ~/models/<repo-name>/ by default.
-# Use --output to override the target directory.
+# Use -Output to override the target directory.
 #
 # -HfToken: a HuggingFace access token (https://huggingface.co/settings/tokens).
 # Needed for gated/private models; also lifts the unauthenticated rate limit.
@@ -26,10 +26,28 @@ param(
 
     [string]$Output = "",
 
-    [string]$HfToken
+    [string]$HfToken,
+
+    # Catch-all so GNU-style flags (--convert) produce a helpful message
+    # instead of PowerShell's cryptic "positional parameter cannot be
+    # found" binder error (#19).
+    [Parameter(ValueFromRemainingArguments=$true)]
+    [string[]]$ExtraArgs
 )
 
 $ErrorActionPreference = "Stop"
+
+if ($ExtraArgs) {
+    $gnu = @($ExtraArgs | Where-Object { $_ -match '^--' })
+    if ($gnu) {
+        Write-Host "ERROR: PowerShell flags take a single dash, not '--': $($gnu -join ', ')" -ForegroundColor Red
+        Write-Host "  Try:  .\download-model.ps1 $HfId -Convert -Weight int8 -Trust" -ForegroundColor Yellow
+    } else {
+        Write-Host "ERROR: Unrecognized argument(s): $($ExtraArgs -join ', ')" -ForegroundColor Red
+        Write-Host "  Flags: -Convert -Weight <int4|int8> -Trust -Output <dir> -HfToken <token>" -ForegroundColor Yellow
+    }
+    exit 1
+}
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 
 # huggingface_hub reads HF_TOKEN from the environment, so both 'hf download'
