@@ -324,6 +324,18 @@ def explain_genai_error(e):
         # pool (seen with 30B-class models + big agent prompts, issue #21).
         return (f"{msg} — likely the KV-cache pool is too small for this "
                 f"prompt: raise --cache-size-gb (currently {PROMPT_CACHE_GB} GB)")
+    if "Compilation failed" in msg and ("NPU" in msg or "ZE_RESULT" in msg or "vpux" in msg):
+        # NPU (vpux) compiler rejected the model — a model/driver-combination
+        # problem, not a busy device (issue #20). Known trigger: an INT4
+        # node-naming bug in older compilers (openvino#29823); also models
+        # beyond the NPU envelope (>8B params).
+        return (f"{msg} — the NPU compiler could not compile this model. "
+                f"Usual causes: NPU driver too old for this model's INT4 "
+                f"layout (update the Intel NPU driver; on Linux the "
+                f"intel-npu-driver + compiler versions must match), or the "
+                f"model is beyond the NPU envelope (proven NPU models are "
+                f"INT4-CW, 8B params or less). Try an NPU model from the "
+                f"install menu, or run this model on GPU/CPU instead.")
     if "Could not find a model in the directory" in msg:
         # read_model() found neither openvino_model.xml nor
         # openvino_language_model.xml — usually an interrupted download that
@@ -2303,9 +2315,12 @@ def _load_in_background(slot, model_dir, devices, port, ollama_port, banner_slot
     except Exception as e:
         slot.status = "error"
         print(f"\n  [{slot.device_name}] ERROR: Failed to load model: {explain_genai_error(e)}")
-        if not any(s in str(e) for s in ("Could not find a model", "is truncated")):
+        if not any(s in str(e) for s in ("Could not find a model", "is truncated",
+                                         "Compilation failed")):
             # Device-contention hint only where it's plausible — for a
-            # missing or truncated model it sends people chasing ghosts (#17).
+            # missing/truncated model or a compiler failure it sends people
+            # chasing ghosts (#17, #20 — the latter is literally titled
+            # after this hint).
             print(f"  Is another process using the {slot.device_name}?", flush=True)
 
     # Print banner when all slots are done — only one thread wins

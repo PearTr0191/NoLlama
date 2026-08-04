@@ -634,6 +634,36 @@ by the installer, or refused at load with an error that says exactly what's
 missing — so if you assembled a model directory by hand and NoLlama rejects
 it, trust the message, not the folder listing.
 
+### Model won't load? Run the canary first
+
+Before debugging anything else, establish whether the problem is **your
+model** or **your stack**. The registry's smallest model is a ~1 GB
+known-good canary — output quality is terrible, that's not the point;
+it loads everywhere:
+
+```powershell
+.\download-model.ps1 OpenVINO/DeepSeek-R1-Distill-Qwen-1.5B-int4-cw-ov
+python nollama.py --model-dir "~/models/DeepSeek-R1-Distill-Qwen-1.5B-int4-cw-ov" --device NPU   # or GPU / CPU
+```
+
+- **Canary loads, your model doesn't** → the stack is healthy; the model
+  is the problem. NPU limits are real: INT4-**CW** quantization, ≤ 8B
+  params (~6 GB on disk). Bigger or group-quantized INT4 models die in
+  the NPU compiler ("Compilation failed", `vpux-compiler` errors). Run
+  that model on GPU/CPU instead, or pick an NPU model from the menu.
+- **Canary fails too** → driver/stack problem, not the model. Windows:
+  update the Intel NPU driver. Linux: the `intel-npu-driver` and
+  `intel-npu-compiler` versions must match each other and OpenVINO —
+  distro-repo packages often lag; use the
+  [intel/linux-npu-driver releases](https://github.com/intel/linux-npu-driver/releases)
+  compatibility table.
+
+The install-menu models are the proven set; anything you bring via
+`download-model.ps1 -Convert` is best-effort territory — the server's
+startup log now says explicitly what's wrong (missing/truncated files,
+memory that won't fit, KV pool too small, NPU compiler rejection)
+instead of generic errors, so read it before opening an issue. 🙂
+
 ### Finding newer/better models
 
 The model menus rot fast — new architectures appear monthly. The
@@ -653,7 +683,8 @@ What to look for:
 | `-fp16-ov` | GPU + CPU | Full precision. Largest, slowest, sharpest. |
 
 Quick rules of thumb:
-- **NPU chat:** must be `-int4-cw-ov` and ≤ ~10 GB.
+- **NPU chat:** must be `-int4-cw-ov` and ≤ 8B params (~6 GB on disk) —
+  a 14B INT4 fits the old size advice but fails in the NPU compiler (#20).
 - **GPU vision (VLM):** any `-int4-ov` or `-int8-ov` model marked
   "Image-Text-to-Text" on HF.
 - **GPU LLM (smarter than NPU):** any `-int4-ov` model up to your

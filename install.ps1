@@ -180,10 +180,13 @@ if (Test-Path $ModelsRoot) {
                 } catch {}
             }
         }
-        # Detect NPU compatibility: needs int4 quantization and reasonable size.
+        # Detect NPU compatibility: needs int4 quantization and NPU-class size.
         # Matches the older "-int4-cw" / "-cw-ov" naming and the newer plain
         # "-int4-ov" exports (e.g. Qwen3.5). Soft filter — user still confirms.
-        $npuOk = ($_.Name -match "int4") -and $sizeGB -lt 10
+        # Size cap 6 GB ~ 8B params at int4: proven NPU models top out at 8B
+        # (~4.4 GB); a 14B int4 (~8 GB) slipped under the old 10 GB cap and
+        # died in the NPU compiler (#20).
+        $npuOk = ($_.Name -match "int4") -and $sizeGB -lt 6
         [PSCustomObject]@{ Name = $_.Name; Path = $_.FullName; SizeGB = $sizeGB; Type = $mtype; NpuOk = $npuOk }
     })
 }
