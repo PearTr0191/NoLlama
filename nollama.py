@@ -278,30 +278,53 @@ def _dir_size_bytes(model_dir):
 
 
 def _verify_weights_integrity(model_dir):
-    """Byte-exact truncation check. The IR .xml records each weight blob's
+    """Byte-exact completeness check. The IR .xml records each weight blob's
     offset+size into the .bin, so max(offset+size) is the exact minimum byte
     count the .bin must have — catches a download/copy that lost even the
     last 8 bytes (the IR carries no checksum, so corruption-in-place is out
     of scope; truncation is the realistic failure). Returns an error string,
     or None when intact / not checkable.
+
+    Checks **every** IR .xml in the directory. Two reasons this isn't the two
+    hardcoded names it used to be:
+
+    - A modern VLM export is several IRs, not one: Qwen3.6-35B-A3B ships
+      language_model + text_embeddings + vision_embeddings(+_merger/_pos),
+      and any single one of them can arrive short.
+    - A .bin that is missing *entirely* used to be skipped rather than
+      reported, so it read as "weights complete". Found the hard way: a
+      17 GB openvino_language_model.bin whose transfer died left a directory
+      that passed the check with 4 GB of the 18 GB present.
+
+    An .xml declaring no weight blobs needs no .bin, so absence is only an
+    error when the graph actually references weights.
     """
-    for base in ("openvino_model", "openvino_language_model"):
-        xml = os.path.join(model_dir, base + ".xml")
+    try:
+        names = sorted(f for f in os.listdir(model_dir) if f.endswith(".xml"))
+    except OSError:
+        return None
+    for name in names:
+        base = name[:-4]
         binf = os.path.join(model_dir, base + ".bin")
-        if not (os.path.isfile(xml) and os.path.isfile(binf)):
-            continue
         try:
-            with open(xml, "rb") as f:
+            with open(os.path.join(model_dir, name), "rb") as f:
                 data = f.read()
             need = max((int(m.group(1)) + int(m.group(2)) for m in
                         re.finditer(rb'offset="(\d+)" size="(\d+)"', data)),
                        default=0)
-            have = os.path.getsize(binf)
         except (OSError, ValueError):
             continue
-        if need and have < need:
+        if not need:
+            continue
+        if not os.path.isfile(binf):
+            return (f"{base}.bin is missing, but {name} references "
+                    f"{need:,} bytes of weights. Incomplete download or copy "
+                    f"— delete the model directory and re-fetch it "
+                    f"(install.ps1 / download-model.ps1).")
+        have = os.path.getsize(binf)
+        if have < need:
             return (f"{base}.bin is truncated: {have:,} bytes on disk but "
-                    f"{base}.xml expects at least {need:,}. Incomplete "
+                    f"{name} expects at least {need:,}. Incomplete "
                     f"download or copy — delete the model directory and "
                     f"re-fetch it (install.ps1 / download-model.ps1).")
     return None
