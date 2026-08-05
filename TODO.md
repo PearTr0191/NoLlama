@@ -1,5 +1,34 @@
 # TODO
 
+## Load GGUF directly — openvino-genai already can (2026-08-06)
+
+openvino-genai 2026.1 ships a **GGUF reader** we don't expose at all
+(`gguf_modeling.cpp`, `gguf_quants.cpp`, `gguf_tokenizer.cpp`, `load_gguf`,
+`GGUFAdapterImpl` in the shipped `openvino_genai.dll`). If NoLlama passed a
+`.gguf` path to `LLMPipeline`, users could skip `optimum-cli export` — and
+skip the RAM wall that makes conversion the worst part of the project.
+
+Scope limit, read out of the binary's dispatch table (the three names sit
+immediately before the `Unsupported model architecture '` string):
+
+    llama    qwen2    qwen3
+
+Probed and **absent**: `qwen3next`, `qwen3moe`, `qwen2moe`, `deepseek2`,
+`glm4`, `granite`, `bitnet`. So dense Qwen3/Qwen2.5-Coder and Llama GGUFs
+are in scope; **MoE is not** — Qwen3-Coder-Next GGUF will not load, which
+kills the obvious hope that GGUF routes around the 400 GB conversion.
+
+Next step is a 10-minute experiment, not a design: point `LLMPipeline` at a
+small Qwen3 GGUF on GPU and see whether it loads and generates. Everything
+above is inferred from strings in a stripped DLL — verify before writing it
+down as fact anywhere user-facing. Expect NPU not to work (it needs its own
+compiled blob path).
+
+Worth knowing even if we don't ship it: it's the answer to "why do I have to
+convert when Ollama just pulls?" for a chunk of the model space.
+
+---
+
 ## Make more memory available to the iGPU (2026-08-04)
 
 By default Windows budgets the iGPU ~half of system RAM (the Arc 140V on a

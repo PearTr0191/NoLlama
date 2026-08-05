@@ -53,10 +53,30 @@ OpenAI-compatible LLM/VLM server for Intel hardware. NPU-first.
   models can arrive without install.ps1 — a truncated/missing model fails with a
   plain-English error, and the "Is another process using the NPU?" hint is suppressed
   for that class of failure.
+- Model naming: the **directory name is authoritative** — it's the web-UI label and the
+  model ID clients request. `resolve_display_name` uses the name as given and only follows
+  a symlink/junction when that name is generic (`model/`, `gpu-model/`, which is what
+  install.ps1 links). It previously called `realpath` unconditionally, which silently
+  discarded a deliberate rename (#19). There is deliberately **no `--model-name` flag** —
+  see `TODONT.md` for why the rename is the interface.
+- `--scan` reports what each model directory actually holds — display name (and where it
+  came from), LLM/VLM/Whisper, architecture, MoE shape, geometry, integrity, and the real
+  weight precision read from the IR's model-level `<rt_info>` (`nncf/weight_compression/
+  mode` + `group_size` + `ratio` + `awq`) rather than from the folder name, which can lie.
+  `read_ir_rt_info` seeks the **tail** of the `.xml` (the graph is tens of MB on a large
+  model; the model-level block is the last `<rt_info>`, after `<edges>`). No server, no
+  device init, no model load. Note VLM configs nest geometry under `text_config` —
+  `_text_config` handles that, which also fixed the KV half of the memory preflight
+  silently no-op'ing on every VLM.
 - `download-model.ps1` — fetch/convert any HF model. PowerShell-style flags
   (`-Convert -Weight int4 -Trust`), NOT GNU `--convert` (#19: the docs once showed
   `--` syntax and users copy-pasted it; a catch-all param now prints the corrected
-  command when someone tries).
+  command when someone tries). **Conversion is RAM-bound, not disk-bound**: optimum-intel's
+  Qwen3-Next patcher builds an fp32 copy of every expert weight (workaround for OpenVINO
+  CVS-181449) — for Qwen3-Coder-Next that's `512 experts × 2048 × 512 × 4 B` = 2 GB per
+  projection stack, ~288 GB across 48 layers × 3. Measured: **400 GB of Windows pagefile
+  (on 128 GB RAM) succeeded**, 200 GB did not (#19, Dmitriy Teteruk). Weight format is
+  irrelevant to this stage — the blowup is before quantization.
 - Tool calling: **GPU/iGPU + CPU** (gated by `_tools_supported`, i.e.
   `device_name in ("GPU","CPU")`); the **NPU is excluded** — it has a hard prompt cap and
   small NPU-class models can't drive agent loops, so when the NPU serves the request we

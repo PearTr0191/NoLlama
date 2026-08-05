@@ -12,6 +12,7 @@ Usage:
     python nollama.py --gpu-model-dir gpu-model              # dual: NPU chat + GPU vision
     python nollama.py --model-dir ~/models/qwen3-14b-int4-ov --device GPU  # big LLM on GPU
     python nollama.py --whisper-dir whisper-model             # add speech-to-text
+    python nollama.py --scan                                 # what models do I have?
 """
 
 import argparse
@@ -27,6 +28,7 @@ import sys
 import time
 import threading
 import uuid
+import xml.etree.ElementTree as ET
 from datetime import datetime
 from pathlib import Path
 from queue import Queue, Empty
@@ -90,22 +92,59 @@ def is_vlm(model_dir):
         return False
 
 
-def model_display_name(model_dir):
-    """Extract a human-readable model name from directory or config."""
-    resolved = os.path.realpath(model_dir)
-    name = os.path.basename(os.path.normpath(resolved))
-    for suffix in ("-ov", "-openvino", "-int8", "-int4"):
-        if name.endswith(suffix):
+# Suffixes describing the *export* rather than the model, dropped from the
+# display name (and so from the model ID clients configure).
+_NAME_SUFFIXES = ("-ov", "-openvino", "-int8", "-int4")
+
+# Directory names carrying no information. install.ps1 links model/ -> the
+# real model directory, so one of these means "look through the link".
+# Deliberately excludes "whisper-model": it's a real directory name people
+# download into, and treating it as generic would rename that model's API ID
+# from "whisper-model" to "whisper" for no gain.
+_GENERIC_DIR_NAMES = ("model", "models", "gpu-model", "npu-model", "")
+
+
+def _strip_name_suffixes(name):
+    for suffix in _NAME_SUFFIXES:
+        if name.lower().endswith(suffix):
             name = name[: -len(suffix)]
-    if name in ("model", "models", "gpu-model", "npu-model", ""):
-        cfg_path = os.path.join(model_dir, "config.json")
-        try:
-            with open(cfg_path) as f:
-                cfg = json.load(f)
-            name = cfg.get("model_type", name) or name
-        except Exception:
-            pass
-    return name or "unknown"
+    return name
+
+
+def resolve_display_name(model_dir):
+    """Return (name, why) for the name NoLlama shows and clients request.
+
+    The directory name as given wins. Only when it carries no information
+    (install.ps1 links a generic model/ at the real directory) do we follow
+    the link to find a real name. Resolving symlinks unconditionally — what
+    this did before #19 — silently threw away a deliberate rename, so
+    renaming a model folder appeared to have no effect at all. Renaming the
+    directory is the one naming interface that needs no documentation, so it
+    has to work.
+    """
+    given = _strip_name_suffixes(
+        os.path.basename(os.path.normpath(os.path.abspath(model_dir))))
+    if given.lower() not in _GENERIC_DIR_NAMES:
+        return given, "directory name"
+
+    target = _strip_name_suffixes(
+        os.path.basename(os.path.normpath(os.path.realpath(model_dir))))
+    if target.lower() not in _GENERIC_DIR_NAMES:
+        return target, "link target (directory name is generic)"
+
+    try:
+        with open(os.path.join(model_dir, "config.json")) as f:
+            model_type = json.load(f).get("model_type")
+        if model_type:
+            return model_type, "config.json model_type (no usable directory name)"
+    except Exception:
+        pass
+    return "unknown", "nothing identifiable found"
+
+
+def model_display_name(model_dir):
+    """Human-readable model name — see resolve_display_name()."""
+    return resolve_display_name(model_dir)[0]
 
 
 # ---------------------------------------------------------------------------
@@ -268,15 +307,26 @@ def _verify_weights_integrity(model_dir):
     return None
 
 
+def _text_config(model_dir):
+    """config.json for the language model — VLMs nest it under text_config."""
+    with open(os.path.join(model_dir, "config.json")) as f:
+        cfg = json.load(f)
+    nested = cfg.get("text_config")
+    return nested if isinstance(nested, dict) else cfg
+
+
 def _kv_bytes_per_token(model_dir):
     """KV-cache bytes per token from config.json geometry (K+V, fp16).
 
     E.g. Qwen2.5-Coder-7B (28 layers x 4 KV heads x 128 head-dim) ≈ 57 KB/tok;
     Qwen3-Coder-30B ≈ 96 KB/tok. None when the geometry can't be read.
+
+    VLM configs nest the language model under "text_config" (the top level
+    holds only the vision/text split), so read through that when present —
+    otherwise every VLM silently skipped the KV half of the preflight.
     """
     try:
-        with open(os.path.join(model_dir, "config.json")) as f:
-            cfg = json.load(f)
+        cfg = _text_config(model_dir)
         layers = cfg["num_hidden_layers"]
         heads = cfg["num_attention_heads"]
         kv_heads = cfg.get("num_key_value_heads") or heads
@@ -284,6 +334,259 @@ def _kv_bytes_per_token(model_dir):
         return 2 * layers * kv_heads * head_dim * 2
     except Exception:
         return None
+
+
+# ---------------------------------------------------------------------------
+# Model introspection (--scan)
+# ---------------------------------------------------------------------------
+
+def _flatten_rt_info(elem, prefix=""):
+    """Flatten <a><b value="x"/></a> into {"a/b": "x"}."""
+    out = {}
+    for child in elem:
+        key = prefix + child.tag
+        if child.get("value") is not None:
+            out[key] = child.get("value")
+        out.update(_flatten_rt_info(child, key + "/"))
+    return out
+
+
+def read_ir_rt_info(model_dir):
+    """Model-level <rt_info> from the IR .xml — the authoritative record of
+    how a model was exported: nncf weight-compression mode and group size,
+    plus the OpenVINO / optimum-intel / transformers versions that built it.
+    Believe this over the directory name, which can say anything.
+
+    Read from the tail of the file. The .xml holds the graph (tens of MB on a
+    large model) and the model-level block is the last <rt_info> in it —
+    per-node ones live inside <layers>, which precedes <edges> and the
+    trailing block.
+    """
+    for base in ("openvino_model", "openvino_language_model"):
+        xml = os.path.join(model_dir, base + ".xml")
+        if not os.path.isfile(xml):
+            continue
+        try:
+            with open(xml, "rb") as f:
+                f.seek(max(0, os.path.getsize(xml) - 262144))
+                tail = f.read()
+            start = tail.rfind(b"<rt_info>")
+            end = tail.rfind(b"</rt_info>")
+            if start == -1 or end <= start:
+                return {}
+            fragment = tail[start:end + len(b"</rt_info>")]
+            return _flatten_rt_info(ET.fromstring(fragment))
+        except (OSError, ET.ParseError):
+            return {}
+    return {}
+
+
+def weight_precision(model_dir, rt=None):
+    """Human-readable weight precision, read from the IR's own nncf record.
+
+    A directory called -int4-ov can contain anything; this is what the
+    weights actually are.
+    """
+    rt = read_ir_rt_info(model_dir) if rt is None else rt
+    mode = rt.get("nncf/weight_compression/mode")
+    if not mode:
+        try:
+            with open(os.path.join(model_dir, "config.json")) as f:
+                cfg = json.load(f)
+            dtype = cfg.get("dtype") or cfg.get("torch_dtype")
+            return f"{dtype} (weights not compressed)" if dtype else "unknown"
+        except Exception:
+            return "unknown"
+
+    bits = ("INT4" if "int4" in mode else
+            "INT8" if "int8" in mode else
+            "FP8" if "f8" in mode or "fp8" in mode else mode)
+    detail = []
+    if mode.endswith("_sym"):
+        detail.append("symmetric")
+    elif mode.endswith("_asym"):
+        detail.append("asymmetric")
+    group_size = rt.get("nncf/weight_compression/group_size")
+    if group_size == "-1":
+        detail.append("channel-wise")
+    elif group_size:
+        detail.append(f"group size {group_size}")
+    label = bits + (f" ({', '.join(detail)})" if detail else "")
+
+    ratio = rt.get("nncf/weight_compression/ratio")
+    try:
+        # ratio < 1 means only that fraction of layers got the low-bit
+        # treatment and the rest fell back to backup_mode — a mixed model
+        # that a folder name would report as plain "int4".
+        if ratio and float(ratio) < 1.0:
+            backup = rt.get("nncf/weight_compression/backup_mode", "int8")
+            label += f", {float(ratio) * 100:.0f}% of layers (rest {backup})"
+    except ValueError:
+        pass
+    if rt.get("nncf/weight_compression/awq") == "True":
+        label += " +AWQ"
+    if rt.get("nncf/weight_compression/scale_estimation") == "True":
+        label += " +scale-estimation"
+    return label
+
+
+def describe_model(model_dir):
+    """Everything NoLlama can determine about a model directory from its own
+    files, with no user input.
+
+    The one thing the files do NOT record is the variant: config.json has no
+    _name_or_path, and e.g. Qwen3-Coder-Next and Qwen3-Next-Instruct are
+    identical in architecture and geometry. So the directory name stays the
+    carrier of the variant — which is why resolve_display_name() must respect
+    a rename (#19).
+    """
+    name, why = resolve_display_name(model_dir)
+    rt = read_ir_rt_info(model_dir)
+    try:
+        with open(os.path.join(model_dir, "config.json")) as f:
+            cfg = json.load(f)
+    except Exception:
+        cfg = {}
+    try:
+        # Geometry lives under text_config on a VLM.
+        geo = _text_config(model_dir)
+    except Exception:
+        geo = cfg
+
+    if cfg.get("model_type") == "whisper":
+        kind = "Whisper (speech-to-text)"
+    elif is_vlm(model_dir):
+        kind = "VLM (vision + text)"
+    else:
+        kind = "LLM (text)"
+
+    return {
+        "path": os.path.abspath(model_dir),
+        "name": name,
+        "name_source": why,
+        "kind": kind,
+        "architecture": (cfg.get("architectures") or [None])[0],
+        "model_type": cfg.get("model_type"),
+        "layers": geo.get("num_hidden_layers"),
+        "context": geo.get("max_position_embeddings"),
+        "experts": geo.get("num_experts") or geo.get("num_local_experts"),
+        "experts_active": geo.get("num_experts_per_tok"),
+        "precision": weight_precision(model_dir, rt),
+        "size_bytes": _dir_size_bytes(model_dir),
+        "kv_per_token": _kv_bytes_per_token(model_dir),
+        "integrity": _verify_weights_integrity(model_dir),
+        "openvino_version": rt.get("Runtime_version"),
+        "optimum_intel_version": rt.get("optimum/optimum_intel_version"),
+        "transformers_version": rt.get("optimum/transformers_version"),
+    }
+
+
+def _is_model_dir(path):
+    return any(os.path.isfile(os.path.join(path, f)) for f in
+               ("openvino_model.xml", "openvino_language_model.xml",
+                "openvino_encoder_model.xml"))
+
+
+def _model_dirs_under(path, depth):
+    """Model directories at or below `path`, searching `depth` levels down."""
+    if not os.path.isdir(path):
+        return []
+    if _is_model_dir(path):
+        return [path]
+    if depth <= 0:
+        return []
+    found = []
+    try:
+        for entry in sorted(os.listdir(path)):
+            sub = os.path.join(path, entry)
+            if os.path.isdir(sub) and not entry.startswith("."):
+                found.extend(_model_dirs_under(sub, depth - 1))
+    except OSError:
+        pass
+    return found
+
+
+def scan_models(paths):
+    """Print what NoLlama actually sees in each model directory.
+
+    The alternative to this was a --model-name override flag, which needs
+    knowledge a user shouldn't have to have (#19). This answers "what have I
+    got, and what will it be called?" from the files on disk, so the answer
+    comes from the machine rather than from documentation.
+    """
+    searched = [os.path.normpath(os.path.expanduser(p)) for p in
+                (paths or [SCRIPT_DIR, "~/models"])]
+    # One model reached by several paths (install.ps1 links model/ at a
+    # directory in ~/models) is one model — report it once, listing the
+    # aliases, rather than twice as if there were two copies.
+    dirs, aliases = [], {}
+    for path in searched:
+        for d in _model_dirs_under(path, depth=2):
+            real = os.path.realpath(d)
+            if real in aliases:
+                if d not in aliases[real]:
+                    aliases[real].append(d)
+                continue
+            aliases[real] = []
+            dirs.append(d)
+
+    print("  NoLlama model scan\n")
+    if not dirs:
+        print("  No OpenVINO models found in:")
+        for path in searched:
+            print(f"    {path}")
+        print("\n  A model directory is one holding openvino_model.xml + .bin.")
+        print("  Fetch one with:  .\\download-model.ps1 <hf-repo-id>")
+        return
+
+    for directory in dirs:
+        info = describe_model(directory)
+        print(f"  {info['path']}")
+        for alias in aliases.get(os.path.realpath(directory), []):
+            print(f"    (also reachable as {alias})")
+        print(f"    Name in API/UI : {info['name']}"
+              f"      (from {info['name_source']})")
+        print(f"    Kind           : {info['kind']}")
+        arch = info["architecture"] or info["model_type"] or "unknown"
+        if info["model_type"] and info["architecture"]:
+            arch += f" / {info['model_type']}"
+        print(f"    Architecture   : {arch}")
+        print(f"    Weights        : {info['precision']}", end="")
+        if info["size_bytes"]:
+            print(f"   {info['size_bytes'] / (1 << 30):,.1f} GB on disk")
+        else:
+            print()
+        if info["experts"]:
+            active = info["experts_active"] or "?"
+            print(f"    MoE            : {info['experts']} experts, "
+                  f"{active} active per token")
+        geometry = []
+        if info["layers"]:
+            geometry.append(f"{info['layers']} layers")
+        if info["context"]:
+            geometry.append(f"{info['context']:,}-token context")
+        if info["kv_per_token"]:
+            geometry.append(f"{info['kv_per_token'] / 1024:,.0f} KB/token KV")
+        if geometry:
+            print(f"    Geometry       : {', '.join(geometry)}")
+        built = [v for v in (
+            f"OpenVINO {info['openvino_version']}" if info["openvino_version"] else None,
+            f"optimum-intel {info['optimum_intel_version']}" if info["optimum_intel_version"] else None,
+            f"transformers {info['transformers_version']}" if info["transformers_version"] else None,
+        ) if v]
+        if built:
+            print(f"    Exported with  : {', '.join(built)}")
+        if info["kind"].startswith("LLM"):
+            print(f"    Agent mode     : tool calling on GPU/CPU; never on NPU "
+                  f"(hard prompt cap)")
+        if info["integrity"]:
+            print(f"    PROBLEM        : {info['integrity']}")
+        else:
+            print(f"    Integrity      : weights complete")
+        print()
+
+    print("  To change the name shown in the UI and requested by clients,")
+    print("  rename the model directory — that name is what NoLlama uses.")
 
 
 # ---------------------------------------------------------------------------
@@ -2407,6 +2710,11 @@ def parse_args():
                         "Auto-enabled (as prewarm-<port>.json) when --idle-timeout is 0.")
     p.add_argument("--no-prewarm", action="store_true",
                    help="Disable the automatic prewarm that --idle-timeout 0 turns on.")
+    p.add_argument("--scan", nargs="*", default=None, metavar="DIR",
+                   help="Report what each model directory actually contains "
+                        "(name, precision, architecture, integrity) and exit. "
+                        "Searches the NoLlama directory and ~/models by "
+                        "default; pass directories to search those instead.")
     return p.parse_args()
 
 
@@ -2415,6 +2723,13 @@ def main():
     global PROMPT_CACHE, PROMPT_CACHE_GB, PREWARM_FILE
 
     args = parse_args()
+
+    # --scan is a report, not a server: no ports, no devices, no model load.
+    if args.scan is not None:
+        print(flush=True)
+        scan_models(args.scan)
+        return
+
     model_dir = os.path.expanduser(args.model_dir)
     max_dim = args.max_dim
     debug = args.debug

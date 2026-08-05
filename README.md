@@ -354,7 +354,40 @@ python nollama.py --no-prompt-cache     # disable prefix caching
 # with --no-prewarm) — combining --prewarm with idle unload gets a warning,
 # because the warmed cache is thrown away when the model idle-unloads.
 python nollama.py --prewarm prewarm.json
+
+# What models do I actually have? Reports each model directory's real
+# contents — no server started, no model loaded.
+python nollama.py --scan
+python nollama.py --scan D:\models      # search somewhere else
 ```
+
+### What have I got? (`--scan`)
+
+`--scan` answers that from the files on disk rather than from what a folder
+is called:
+
+```
+  C:\Users\you\models\Qwen3-Coder-Next-int8-ov
+    Name in API/UI : Qwen3-Coder-Next      (from directory name)
+    Kind           : LLM (text)
+    Architecture   : Qwen3NextForCausalLM / qwen3_next
+    Weights        : INT8 (asymmetric, channel-wise)   80.1 GB on disk
+    MoE            : 512 experts, 10 active per token
+    Geometry       : 48 layers, 262,144-token context, 32 KB/token KV
+    Exported with  : OpenVINO 2026.1.0, optimum-intel 1.27.0, transformers 4.57.6
+    Agent mode     : tool calling on GPU/CPU; never on NPU (hard prompt cap)
+    Integrity      : weights complete
+```
+
+The precision comes from the IR's own `nncf` record, not the directory name
+— a folder called `-int4-ov` can contain anything, and `--scan` reports what
+the weights actually are (including partial quantization and AWQ). It also
+runs the truncation check, so it's the quickest way to tell a bad download
+from a bad model.
+
+**To rename a model,** rename its directory: that name is what the web UI
+shows and what clients request as the model ID. There's deliberately no
+`--model-name` flag — see `TODONT.md`.
 
 **Size the KV pool for your model.** The pool must hold the whole
 conversation: bytes-per-token scale with the model's layer/head geometry

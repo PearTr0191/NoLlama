@@ -3,6 +3,48 @@
 Things we tried that didn't work, or that work but aren't worth doing. Each
 entry explains *why not* so we don't re-litigate it in six months.
 
+## `--model-name` / `--model-description` override flags (2026-08-06)
+
+Idea: let the user set the name shown in the web UI and reported as the
+model ID, since renaming the model folder appeared to do nothing. Raised by
+Dmitriy Teteruk (issue #19) after converting Qwen3-Coder-Next himself and
+wanting it to show up as something sensible.
+
+**Verdict:** don't add the flags. Fix the rename and add `--scan` instead.
+
+**Why not:**
+- **The bug was ours, not the interface's.** `model_display_name()` called
+  `os.path.realpath()` unconditionally, so on a junction (which is what
+  `install.ps1` creates) the name came from the *link target* and the user's
+  rename was silently discarded. Renaming a directory is already the naming
+  interface — it needed no documentation, no flag, and no knowledge. It just
+  had to work. Now it does: the given name wins, and the link is only
+  followed when the directory name is generic (`model/`, `gpu-model/`).
+- **A flag puts the cost in the wrong place.** It has to be discovered in
+  `--help`, then threaded through the generated `start.ps1`, then kept in
+  sync per slot (primary, GPU, whisper). The person most likely to need it
+  is the person least likely to be editing launch scripts — the exact user
+  who reported it.
+- **Most of what a description would say is already on disk, and more
+  reliably.** The IR's model-level `<rt_info>` records the real nncf
+  weight-compression mode, group size, ratio and AWQ flag; `config.json`
+  gives architecture, layer count, context and MoE expert counts. `--scan`
+  reports those as facts. A hand-typed description would just be an
+  opportunity to be wrong — a folder named `-int4-ov` holding int8 weights
+  is exactly the confusion the feature would have entrenched.
+
+**The one thing detection genuinely cannot do:** recover the *variant*.
+`config.json` in an OpenVINO export has no `_name_or_path`, and
+Qwen3-Coder-Next vs Qwen3-Next-Instruct are identical in architecture and
+geometry — indistinguishable from the files. That's precisely why the
+directory name must stay authoritative for naming instead of being
+second-guessed by a heuristic.
+
+Re-evaluate if: someone needs two directories with the same basename served
+under different IDs (two quantizations of one model in one process). That's
+a real case a rename can't express — but nobody has asked for it, and the
+dual-slot routing (`_route_request`) would need work first anyway.
+
 ## `--cpu-model-dir` — a third generative slot in one process (2026-08-03)
 
 Idea: add a third `DeviceSlot` so one NoLlama process could serve chat +
