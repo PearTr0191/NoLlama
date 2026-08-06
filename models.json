@@ -8,6 +8,34 @@
             "notes": "Recommended (proven). Best quality verified for NPU."
         },
         {
+            "name": "SmolLM3 3B (INT4-CW)",
+            "hf_id": "aweussom/SmolLM3-3B-int4-cw-ov",
+            "source": "pre-exported",
+            "est_size_gb": 2,
+            "notes": "Tested on 285K NPU: 23.3 tok/s. New in OpenVINO 2026.3; also runs GPU/CPU."
+        },
+        {
+            "name": "SmolLM3 3B (INT8-CW)",
+            "hf_id": "aweussom/SmolLM3-3B-int8-cw-ov",
+            "source": "pre-exported",
+            "est_size_gb": 3,
+            "notes": "Tested on 285K NPU: 12.3 tok/s. Half the speed of INT4-CW, better quality headroom."
+        },
+        {
+            "name": "LFM2.5 1.2B Instruct (INT4-CW)",
+            "hf_id": "aweussom/LFM2.5-1.2B-Instruct-int4-cw-ov",
+            "source": "pre-exported",
+            "est_size_gb": 1,
+            "notes": "Tested on 285K NPU: 38.8 tok/s — fastest verified NPU model. NPU-only build (fails CPU/GPU, see model card)."
+        },
+        {
+            "name": "LFM2 1.2B (INT4-CW)",
+            "hf_id": "aweussom/LFM2-1.2B-int4-cw-ov",
+            "source": "pre-exported",
+            "est_size_gb": 1,
+            "notes": "Tested on 285K NPU: 36.5 tok/s. NPU-only build (fails CPU/GPU, see model card)."
+        },
+        {
             "name": "Phi 3.5 Mini (INT4-CW)",
             "hf_id": "OpenVINO/Phi-3.5-mini-instruct-int4-cw-ov",
             "source": "pre-exported",
