@@ -63,7 +63,18 @@ if (Test-Path $VenvDir) {
         $venvOk = ($LASTEXITCODE -eq 0)
     }
     if ($venvOk) {
-        Write-Host "[OK] venv already exists"
+        # Show what's actually installed: "venv exists" hid that the runtime
+        # could be releases behind (requirements.txt floors are >=, so a
+        # fresh venv always gets the newest OpenVINO).
+        $venvPython = Join-Path $VenvDir $VenvBinDir "python$ExeExt"
+        $genaiVer = & $venvPython -c "import openvino_genai as og; print(og.__version__)" 2>$null
+        if (-not $genaiVer) { $genaiVer = "openvino-genai not installed?" }
+        Write-Host "[OK] venv already exists (openvino-genai $genaiVer)"
+        Write-Host "     Recreating it pulls the newest OpenVINO runtime." -ForegroundColor DarkGray
+        $reply = Read-Host "     Delete and recreate venv for a fresh install? [y/N]"
+        if ($reply -in @("y", "Y", "yes")) {
+            Remove-Item -Recurse -Force $VenvDir
+        }
     } else {
         Write-Host "[!] venv at $VenvDir is broken (likely moved from another path). Recreating..." -ForegroundColor Yellow
         Remove-Item -Recurse -Force $VenvDir
