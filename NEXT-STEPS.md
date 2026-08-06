@@ -15,6 +15,20 @@ Ratio sweep, Qwen3-30B on 140V (18 GB cap): 30 → 10.79 GB @ 4.9 tok/s;
 framing: offload makes 30B *possible* (overnight/batch quality), not
 interactive; resident 8B does 197 tok/s on the same GPU.
 
+LATE-NIGHT ADDENDUM — big MoE on CPU (285K, 2026-08-07 00:xx):
+- Qwen3-30B-A3B int4 on the 285K CPU: **23.7 tok/s, TTFT 458 ms** — fully
+  interactive, 4.4× the laptop GPU offload. On a desktop with RAM ≥ model,
+  plain CPU is the best big-MoE device in the house. (A3B decode only
+  touches ~3B active params/token — bandwidth cost of a small model.)
+- Under an 8 GB hard working-set cap (15.2 GB model): 12.3 tok/s — the A3B
+  access pattern tolerates eviction well. Caveat: pagefile use 17.9 GB
+  shows OpenVINO CPU repacks weights into anonymous memory (no llama.cpp-
+  style file-backed mmap streaming), and with 64 GB physical RAM the
+  evicted pages stayed in the standby list (soft faults) — a genuinely
+  RAM-poor machine would do worse. Scripts: scratchpad cpu_pressure_bench.py.
+- Recommendation matrix now: desktop w/ RAM → CPU; XMX laptop, tight
+  memory → GPU + --offload-ratio; non-XMX iGPU → model must fit.
+
 OPEN: Qwen3.5-4B vision verdict for the registry note; SmolLM3 registry
 notes could mention thinking-mode + /no_think; desktop swap-raise is NOT
 needed (offload can't work there — no XMX).
