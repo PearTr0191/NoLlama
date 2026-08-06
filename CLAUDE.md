@@ -143,6 +143,16 @@ OpenAI-compatible LLM/VLM server for Intel hardware. NPU-first.
   of aborting. OpenVINO can't cancel a blocked prefill, so an aborted client leaves the
   generation churning — another reason to keep clients connected via heartbeat.
 
+## MoE disk offload (2026-08-06)
+
+`--offload-ratio PCT` streams PCT% of MoE expert weights from disk on GPU
+slots (OpenVINO 2026.3 `OFFLOAD_RATIO`). **Requires XMX** (Arc/Lunar Lake;
+`GPU_HW_MATMUL` in OPTIMIZATION_CAPABILITIES) — silent no-op without, and
+NoLlama warns at startup. Verified on Arc 140V: Qwen3-30B-A3B int4 in
+2.35 GB resident at ratio 90 (2.5 tok/s — pick the smallest ratio that
+fits instead of maxing it). Non-XMX iGPUs can't load big MoE at all
+(USM staging OOM) — full story in TODONT.md.
+
 ## NPU export rule (2026-08-06)
 
 Models converted for the NPU **must be channel-wise** (`download-model.ps1

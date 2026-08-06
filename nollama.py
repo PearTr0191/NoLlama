@@ -1073,11 +1073,21 @@ class DeviceSlot:
         self._preflight_memory(vlm)
         print(f"  [{self.device_name}] Loading...", flush=True)
 
+        # MoE disk offload (--offload-ratio): GPU-only plugin property, and it
+        # only does anything on XMX hardware (Arc dGPU, Lunar Lake 140V+) —
+        # verified: Qwen3-30B-A3B int4 runs in 2.35 GB resident at ratio 90 on
+        # a 140V, while non-XMX iGPUs silently ignore it (see TODONT.md).
+        offload = {}
+        if OFFLOAD_RATIO > 0 and self.device_name == "GPU":
+            offload = {"OFFLOAD_RATIO": OFFLOAD_RATIO}
+            print(f"  [{self.device_name}] MoE disk offload on "
+                  f"({OFFLOAD_RATIO}% of expert weights streamed)", flush=True)
+
         if vlm:
             VLMPipe = getattr(ovg, "VLMPipeline", None)
             if VLMPipe is None:
                 raise RuntimeError("No VLMPipeline in this openvino_genai build.")
-            self.pipe = VLMPipe(str(model_dir), device=self.device_id)
+            self.pipe = VLMPipe(str(model_dir), device=self.device_id, **offload)
         else:
             # NPU has a default prompt limit of 1024 tokens — raise it
             if self.device_name == "NPU":
@@ -1097,15 +1107,18 @@ class DeviceSlot:
                     sc.cache_size = PROMPT_CACHE_GB
                     self.pipe = ovg.LLMPipeline(
                         str(model_dir), device=self.device_id, scheduler_config=sc,
+                        **offload,
                     )
                     print(f"  [{self.device_name}] prefix caching on "
                           f"({PROMPT_CACHE_GB} GB KV pool)", flush=True)
                 except Exception as e:
                     print(f"  [{self.device_name}] prefix caching unavailable "
                           f"({e}); using plain pipeline", flush=True)
-                    self.pipe = ovg.LLMPipeline(str(model_dir), device=self.device_id)
+                    self.pipe = ovg.LLMPipeline(str(model_dir), device=self.device_id,
+                                                **offload)
             else:
-                self.pipe = ovg.LLMPipeline(str(model_dir), device=self.device_id)
+                self.pipe = ovg.LLMPipeline(str(model_dir), device=self.device_id,
+                                            **offload)
 
     def _preflight_memory(self, vlm):
         """Sanity-check model weights + KV pool against the device's memory
@@ -1545,6 +1558,9 @@ def apply_penalties(gen, repetition=None, frequency=None, presence=None):
                 pass
 PROMPT_CACHE = True   # prefix-KV caching on GPU/CPU LLM slots (set False via --no-prompt-cache)
 PROMPT_CACHE_GB = 2   # KV-cache pool size (GB) when prefix caching is on
+OFFLOAD_RATIO = 0     # % of MoE expert weights streamed from disk on GPU (--offload-ratio).
+                      # Needs an XMX-capable GPU (Arc/Lunar Lake+) — silent no-op without.
+                      # Measured on Arc 140V: 30B-A3B int4 runs in 2.35 GB resident at 90.
 PREWARM_FILE = None   # path (--prewarm) to a saved prompt: prefilled at startup, auto-captured while serving
 PREWARM_MIN_CHARS = 4000  # only pre-warm/capture big (agent-sized) system prompts, not plain chat
 _prewarm_hash = None  # debounce: only re-capture when the system prompt changes
@@ -2768,6 +2784,13 @@ def parse_args():
                         "Auto-enabled (as prewarm-<port>.json) when --idle-timeout is 0.")
     p.add_argument("--no-prewarm", action="store_true",
                    help="Disable the automatic prewarm that --idle-timeout 0 turns on.")
+    p.add_argument("--offload-ratio", type=int, default=0, metavar="PCT",
+                   help="Stream PCT%% of MoE expert weights from disk instead of "
+                        "keeping them GPU-resident (OpenVINO 2026.3+ disk offload). "
+                        "Lets 30B-class MoE models run on 16 GB-class GPUs at the "
+                        "cost of decode speed. Requires an XMX-capable Intel GPU "
+                        "(Arc, Lunar Lake) — silently does nothing without one. "
+                        "GPU slots only; 1-99.")
     p.add_argument("--scan", nargs="*", default=None, metavar="DIR",
                    help="Report what each model directory actually contains "
                         "(name, precision, architecture, integrity) and exit. "
@@ -2778,7 +2801,7 @@ def parse_args():
 
 def main():
     global primary, secondary, whisper_slot, max_dim, debug, vscode_compat
-    global PROMPT_CACHE, PROMPT_CACHE_GB, PREWARM_FILE
+    global PROMPT_CACHE, PROMPT_CACHE_GB, PREWARM_FILE, OFFLOAD_RATIO
 
     args = parse_args()
 
@@ -2794,6 +2817,19 @@ def main():
     vscode_compat = args.vscode_compat
     PROMPT_CACHE = not args.no_prompt_cache
     PROMPT_CACHE_GB = args.cache_size_gb
+    OFFLOAD_RATIO = max(0, min(99, args.offload_ratio))
+    if OFFLOAD_RATIO:
+        # Offload is a silent no-op without XMX — say so up front instead of
+        # letting the user believe their model got smaller (see TODONT.md).
+        try:
+            caps = ov.Core().get_property("GPU", "OPTIMIZATION_CAPABILITIES")
+            if "GPU_HW_MATMUL" not in caps:
+                print("WARNING: --offload-ratio set, but this GPU has no XMX "
+                      "(OPTIMIZATION_CAPABILITIES lacks GPU_HW_MATMUL). MoE disk "
+                      "offload will silently do nothing — the model must fit in "
+                      "GPU memory.", flush=True)
+        except Exception:
+            pass
     if args.prewarm:
         PREWARM_FILE = os.path.expanduser(args.prewarm)
     elif args.idle_timeout == 0 and not args.no_prewarm and PROMPT_CACHE:

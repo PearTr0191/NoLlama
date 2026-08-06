@@ -66,6 +66,18 @@ Re-evaluate if: (a) testing on an XMX GPU (Arc 140V laptop / any Arc dGPU)
 ask for their GPU model first, `OPTIMIZATION_CAPABILITIES` containing
 `GPU_HW_MATMUL` is the tell.
 
+**Update 2026-08-06 (same evening):** condition (a) tested on the Arc 140V
+laptop (Core Ultra 7 258V, XMX confirmed) — **offload works exactly as
+advertised there**. LFM2-8B-A1B int4: 4.10 GB resident at ratio 0 →
+0.70 GB at ratio 90 (−83%), SSD streaming visible. Qwen3-30B-A3B int4
+(15.2 GB weights, Intel's 2026.0 pre-convert — so old IRs DO fuse on XMX;
+the tiled layout was never the blocker): loads and generates at ratio 90
+with **2.35 GB resident**, 2.5 tok/s (ratio was oversized; tuning the knee
+is follow-up). The verdict above is thus purely about non-XMX hardware —
+the feature itself is real, first reproduction outside Intel we know of.
+NoLlama grew `--offload-ratio` the same evening, with a startup warning on
+non-XMX GPUs. install.ps1 surfaces XMX at device detection.
+
 ## int8 exports of LFM2 / LFM2.5 for the NPU (2026-08-06)
 
 Idea: channel-wise int4 is the lossiest int4 variant and the NPU forces it,
