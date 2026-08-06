@@ -104,6 +104,12 @@ OpenAI-compatible LLM/VLM server for Intel hardware. NPU-first.
 - Intel Core Ultra (NPU) + Intel ARC 140V 16GB (GPU)
 - OpenVINO 2026.1+ with openvino_genai
 - venv in `venv/`, activate before running
+- `venv-2026.3/` — OpenVINO 2026.3 runtime **plus the modern export stack**
+  (optimum-intel 2.1.0, transformers pinned to 5.4 — the LFM2 exporter's cap —
+  einops, nncf 3.3). Use it for exporting architectures optimum-intel 1.27
+  can't load (EAGLE-3 drafts, new-family models); `venv/` keeps the old
+  1.27/tf-4.57 stack that some exporters still need. 2026.3 passed the
+  regression suite 2026-08-06.
 
 ## Development preferences
 
@@ -137,9 +143,23 @@ OpenAI-compatible LLM/VLM server for Intel hardware. NPU-first.
   of aborting. OpenVINO can't cancel a blocked prefill, so an aborted client leaves the
   generation churning — another reason to keep clients connected via heartbeat.
 
+## NPU export rule (2026-08-06)
+
+Models converted for the NPU **must be channel-wise** (`download-model.ps1
+-Weight int4-cw` or `int8-cw`): default group-quantized int4 IRs crash the
+NPU driver compiler ("Found N duplicated names", known vpux bug). int8-cw
+halves decode vs int4-cw but keeps more quality — except on LFM2-family,
+where no good int8 NPU variant exists (see TODONT.md). OFFLOAD_RATIO (2026.3
+MoE disk offload, GPU-only) could not be validated on the desktop iGPU —
+see TODONT.md before recommending it.
+
 ## Verified models
 
 - Qwen3-8B (INT4-CW) on NPU — recommended, needs MAX_PROMPT_LEN=4096
+- SmolLM3-3B (INT4-CW 23 tok/s, INT8-CW 12 tok/s) on 285K NPU — 2026.3, our export
+- LFM2-1.2B / LFM2.5-1.2B-Instruct (INT4-CW, ~37-39 tok/s) on 285K NPU — NPU-only
+  builds, old-stack exports fail CPU/GPU (see TODONT.md)
+- MiniCPM5-1B (INT4) on GPU/CPU — 2026.3, no NPU support upstream
 - Phi 3.5 Mini (INT4-CW) on NPU — smaller, faster
 - DeepSeek-R1-1.5B (INT4-CW) on NPU — works but terrible quality (testing only)
 - Gemma 3 4B Vision (INT4) on GPU — fast VLM

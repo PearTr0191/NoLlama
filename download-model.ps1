@@ -5,6 +5,15 @@
 #     .\download-model.ps1 OpenVINO/Qwen3-8B-int4-cw-ov          # pre-exported, just download
 #     .\download-model.ps1 Qwen/Qwen2.5-VL-3B-Instruct -Convert -Weight int8
 #     .\download-model.ps1 Qwen/Qwen2.5-VL-3B-Instruct -Convert -Weight int4 -Trust
+#     .\download-model.ps1 HuggingFaceTB/SmolLM3-3B -Convert -Weight int4-cw   # for NPU
+#
+# Converting for the NPU? Use -Weight int4-cw or int8-cw (channel-wise). The
+# default group-quantized int4 produces IRs that crash the NPU driver compiler
+# ("Found N duplicated names" / StopLocationVerifierPass, a known vpux bug);
+# channel-wise exports compile fine and match Intel's own *-int4-cw-ov models.
+# int4-cw vs int8-cw: int8 halves decode speed (SmolLM3-3B on the 285K NPU:
+# 23.3 -> 12.3 tok/s) but channel-wise int4 is the lossiest int4 variant, so
+# prefer int8-cw for <=3B models when quality matters more than snap.
 #     .\download-model.ps1 some-org/gated-model -HfToken hf_xxx  # auth for gated/private models
 #
 # Downloads to ~/models/<repo-name>/ by default.
@@ -107,7 +116,14 @@ if ($Convert) {
     Write-Host "  This may take 5-30 minutes depending on model size."
     Write-Host ""
 
-    $args = @("export", "openvino", "--model", $HfId, "--weight-format", $Weight)
+    # int4-cw / int8-cw: channel-wise symmetric quantization, the NPU-safe
+    # variant (see header note). Maps to optimum-cli's flag spelling.
+    if ($Weight -match '^(int[48])-cw$') {
+        $args = @("export", "openvino", "--model", $HfId, "--weight-format", $Matches[1],
+                  "--group-size", "-1", "--sym", "--ratio", "1.0")
+    } else {
+        $args = @("export", "openvino", "--model", $HfId, "--weight-format", $Weight)
+    }
     if ($Trust) { $args += "--trust-remote-code" }
     $args += $Output
 

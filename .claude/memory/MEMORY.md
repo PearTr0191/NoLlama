@@ -6,5 +6,6 @@
 - [Vendor CLI API-wrap ToS risk](vendor_cli_api_wrap_tos_risk.md) — flag ToS/account-risk concerns BEFORE building when user wants to wrap a vendor's interactive CLI as an API. Lesson from copilot-proxy spike (2026-05-26).
 - [Agentry project](agentry_project.md) — persistent ACP proxy in front of `copilot --acp`, killing per-turn spawn cost for CLI coding-agents. Lives at C:\devel\aweussom\python\agentry, repo at github.com/aweussom/agentry.
 - [NoLlama NPU niche scope](nollama-npu-niche-scope.md) — if Ollama ships working Intel ARC support, drop GPU+CPU from NoLlama and keep NPU as the sole (defensible) target.
-- [OpenCLAW + NoLlama integration](openclaw-nollama-integration.md) — how OpenCLAW is wired to NoLlama; heartbeat/CPU-tools/parser changes; the 21k-token prefill wall on the 285K iGPU.
+- [OpenCLAW + NoLlama integration](openclaw-nollama-integration.md) — DEAD as a use case (2026-08-06); the heartbeat/CPU-tools/parser fixes it produced are still valid, attribute them to Copilot Chat instead.
 - [User hardware setup](user_hardware.md) — 285K + RTX 5090 desktop; CLAUDE.md's ARC 140V line is stale, don't assume it applies
+- [OFFLOAD_RATIO needs XMX](ov-2026-3-offload-ratio-gpu-only.md) — OpenVINO MoE disk offload silently no-ops without XMX hardware (and is GPU-plugin-only); check OPTIMIZATION_CAPABILITIES for GPU_HW_MATMUL before recommending

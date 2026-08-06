@@ -3,6 +3,132 @@
 Things we tried that didn't work, or that work but aren't worth doing. Each
 entry explains *why not* so we don't re-litigate it in six months.
 
+## OFFLOAD_RATIO (2026.3 MoE disk offload) on the desktop 285K iGPU (2026-08-06)
+
+Idea: OpenVINO 2026.3's MoE disk offload ("30B on 16 GB of memory") should
+let big MoE models (Qwen3.6-35B-A3B, Qwen3-30B-A3B, and Dmitriy's 74 GB
+Qwen3-Coder-Next from #19) run on this 33 GB-shared-memory iGPU.
+
+**Verdict:** could not be made to work on this machine, on ANY model, at ANY
+ratio, after a full day of controlled experiments. Do not recommend it to
+users (incl. #19) as more than "exists upstream, unverified by us."
+
+**What was measured (genai 2026.3.0, iGPU shared mem 33 GB, 64 GB RAM,
+141 GB pagefile):**
+- Qwen3.6-35B-A3B int4 VLM (2026.2 export): USM **Device** OOM (512 MB
+  alloc) at ratio absent/40/90 — identical failure, ~9.5 min in. Compiling
+  its language model directly with the property (no VLM wrapper) fails the
+  same, so it is not a property-forwarding problem.
+- Qwen3-30B-A3B-int4-ov, Intel pre-convert (2026.0 export): ratio 0 → USM
+  **Host** OOM (384 MB); ratio 90 → USM Device OOM, one minute later and
+  after staging ~120 GB of host commit. The offload machinery clearly
+  *engages* — and still fails.
+- LFM2-24B-A2B-int4-ov, Intel pre-convert (2026.2 export, **11.6 GB** —
+  fits the 33 GB pool three times over): ratio 0 AND 90 → USM Host OOM
+  (384 MB). An 11.6 GB model failing a 33 GB device on load is the smoking
+  gun: the failure is in the GPU plugin's **weight-staging phase**, before
+  any device-residency savings from offload can apply.
+- Control that the pool itself works: Qwen3-8B int4 (~5 GB) and
+  Qwen2.5-Coder-14B (~8 GB) load and generate fine on this iGPU. The
+  practical ceiling on this box sits between ~8 and ~11.6 GB for MoE IRs.
+
+**ROOT CAUSE (definitive, from source + device query):** the entire MoE
+fusion path is gated in `transformations_pipeline.cpp`:
+
+```cpp
+// Gated on supports_immad (systolic-only) and oneDNN (required for expert GEMM dispatch).
+if (device_info.supports_immad && config.get_use_onednn() && !config.get_moe_disable_fusion())
+```
+
+`supports_immad` = XMX/DPAS systolic hardware. The desktop 285K's Xe-LPG
+iGPU has none (`OPTIMIZATION_CAPABILITIES` lists no `GPU_HW_MATMUL`;
+verified 2026-08-06). No XMX → no TiledMoeBlock→MOECompressed fusion →
+`OFFLOAD_RATIO` is a **silent no-op**, and experts stay as giant plain
+constants — which is also why big-MoE loads OOM in staging on this device.
+Proven end-to-end on a fusable IR: LFM2-8B-A1B exported fresh with the
+2026.3 stack (tiled `u4 [32,1792,16,128]` expert constants confirmed in
+the XML) loads fine and shows byte-identical device memory (14.91 GB) and
+identical tok/s at ratio 0 and 90.
+
+Intel's demos run on XMX-capable GPUs (Lunar Lake Arc 140V, Panther Lake,
+Arc dGPUs). The release notes never mention the hardware gate.
+
+**Consequence:** MoE disk offload is a hardware capability, not a software
+setting, on this box. Raising the pagefile to re-export Qwen3-30B-A3B is
+pointless *for offload on this machine* (the export itself would still be
+useful only on an XMX-capable device). The Arc 140V laptop (original
+NoLlama dev machine) HAS XMX — that is the machine to validate offload on.
+
+Re-evaluate if: (a) testing on an XMX GPU (Arc 140V laptop / any Arc dGPU)
+— use a fresh-stack export, ratio 0 vs 90, `GPU_MEMORY_STATISTICS`;
+(b) Intel lifts the immad gate for non-systolic GPUs in a future release
+(watch `transformations_pipeline.cpp`); (c) recommending it to anyone —
+ask for their GPU model first, `OPTIMIZATION_CAPABILITIES` containing
+`GPU_HW_MATMUL` is the tell.
+
+## int8 exports of LFM2 / LFM2.5 for the NPU (2026-08-06)
+
+Idea: channel-wise int4 is the lossiest int4 variant and the NPU forces it,
+so ship int8 builds of the LFM models for quality-sensitive use — it worked
+for SmolLM3-3B (int8-cw-sym: coherent, 12.3 tok/s vs int4-cw's 23.3 on the
+285K NPU, a fair trade).
+
+**Verdict:** no publishable int8 variant exists for LFM2-family on NPU.
+int4-cw is the only good configuration. The SmolLM3 result does NOT
+generalize.
+
+**Why not (both variants measured on 285K NPU, genai 2026.3):**
+- `--weight-format int8 --sym --group-size -1` (mirroring the int4-cw
+  recipe): compiles and runs FAST (32-33 tok/s) but generates garbage —
+  LFM2-1.2B emits whitespace, LFM2.5-1.2B-Instruct emits "BY-AL-AN-AN-…"
+  loops. Silent numerical breakage, not a crash: the worst failure mode.
+- `--weight-format int8` (asymmetric, Intel's own recipe — their
+  LFM2.5-350M-int8-ov uses it): output is coherent but decode is
+  **1.4 tok/s** (119 tokens in 89 s). Intel's own 350M reference runs
+  4.5 tok/s the same way — asymmetric zero-points evidently fall off the
+  NPU fast path. Correct but unusable.
+- SmolLM3-3B int8-cw-sym is fine (fast AND coherent), so this is
+  LFM-architecture-specific (its short-conv/linear-attention blocks),
+  not a general int8-on-NPU rule.
+
+Re-evaluate if: a newer NPU driver or openvino release changes either half
+(retest is two 5-minute benches with scratchpad `npu_bench.py`-style
+timing), or Intel publishes a fast LFM int8 NPU build — read its rt_info
+for the recipe before assuming ours was wrong.
+
+## Qwen3.6-35B-A3B (Qwen3.5-MoE arch) on the NPU (2026-08-06)
+
+Idea: with OpenVINO 2026.3 passing regression, put the new Qwen3.6-35B-A3B
+INT4 export on the NPU — NPU coverage is the stated priority of the 2026.3
+move, and an A3B MoE (3B active) looks NPU-sized on paper.
+
+**Verdict:** doesn't load. Not a memory problem — an architecture-vs-plugin
+incompatibility. Serve this model on GPU/CPU only until the NPU plugin
+catches up.
+
+**Why not:**
+- Both `VLMPipeline` and `LLMPipeline` on NPU fail in ~3 s at shape
+  inference, before compile, with
+  `Check '!dim::is_empty(minus_one_dim)' failed ...
+  reshape_shape_inference.hpp:357` on node
+  `__module.model.model.language_model/aten::index/Reshape`
+  ("Non-'-1' output dimensions do not evenly divide the input dimensions").
+  The NPU's static-shape import can't reshape a boolean-mask `aten::index`
+  in the Qwen3_5Moe language model. genai 2026.3.0.0-3277, 285K NPU
+  ("AI Boost"), driver as of 2026-08-06.
+- It is *not* the earlier commit failure: that was fixed (141 GB pagefile,
+  33 GB iGPU shared-memory override) and this failure reproduces identically
+  with memory to spare. Don't respond to this error by adding RAM/pagefile.
+- Nothing NoLlama can patch: the export is Intel-toolchain-fresh
+  (OpenVINO 2026.2 export, optimum-intel 1.27.0.dev0) and the failure is in
+  OpenVINO's NPU plugin shape inference, upstream of anything we configure
+  (`MAX_PROMPT_LEN` etc. never comes into play).
+
+Re-evaluate if: a later OpenVINO release notes NPU support for Qwen3.5-MoE /
+`Qwen3_5MoeForConditionalGeneration` (retest is one `--scan`-verified dir +
+a 3-second load attempt), or Intel publishes an NPU-targeted export of this
+family.
+
 ## `--model-name` / `--model-description` override flags (2026-08-06)
 
 Idea: let the user set the name shown in the web UI and reported as the
