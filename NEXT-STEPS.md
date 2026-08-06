@@ -9,10 +9,15 @@ loop defenses + UI stop button (f2131dd), six models published to HF
 (aweussom/: SmolLM3 ×2, LFM2-1.2B, LFM2.5-1.2B, LFM2-8B-A1B, Qwen2.5-VL-3B),
 registry updated, #19 updated with measured numbers.
 
-OPEN: ratio/speed knee for 30B on 140V (try 30/50); Qwen3.5-4B vision
-verdict for the registry note; SmolLM3 registry notes could mention
-thinking-mode + /no_think; desktop swap-raise is NOT needed (offload can't
-work there — no XMX).
+Ratio sweep, Qwen3-30B on 140V (18 GB cap): 30 → 10.79 GB @ 4.9 tok/s;
+50 → 8.05 GB @ 5.4 tok/s; 90 → 2.35 GB @ 2.5 tok/s. Operating point ~50
+(30 is no faster — memory pressure near the cap eats the gain). Honest
+framing: offload makes 30B *possible* (overnight/batch quality), not
+interactive; resident 8B does 197 tok/s on the same GPU.
+
+OPEN: Qwen3.5-4B vision verdict for the registry note; SmolLM3 registry
+notes could mention thinking-mode + /no_think; desktop swap-raise is NOT
+needed (offload can't work there — no XMX).
 
 ## OFFLOAD INVESTIGATION: CLOSED — root cause found, swap raise NOT needed
 
