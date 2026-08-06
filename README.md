@@ -87,6 +87,49 @@ the CPU (which beats a weak iGPU on strong desktops). All are pre-exported — *
 conversion step**, though the multi-GB download still takes a while — and returning
 users see them flagged **"Already on disk"** (those link instantly).
 
+## Models we publish
+
+Where a model the ecosystem needs doesn't exist in OpenVINO form, we build,
+verify and [publish it on HuggingFace](https://huggingface.co/aweussom) —
+several of these are the only OpenVINO builds of their model in existence.
+All are in the `install.ps1` menu, with measured numbers on real hardware:
+
+| Model | NPU (285K) | Notes |
+|---|---|---|
+| [`SmolLM3-3B-int4-cw-ov`](https://huggingface.co/aweussom/SmolLM3-3B-int4-cw-ov) | 23.3 tok/s | New in OpenVINO 2026.3; also runs GPU (29.7) / CPU (37.5) |
+| [`SmolLM3-3B-int8-cw-ov`](https://huggingface.co/aweussom/SmolLM3-3B-int8-cw-ov) | 12.3 tok/s | Quality-first variant; ~half the speed of int4-cw |
+| [`LFM2.5-1.2B-Instruct-int4-cw-ov`](https://huggingface.co/aweussom/LFM2.5-1.2B-Instruct-int4-cw-ov) | **38.8 tok/s** | Fastest model we've verified on an NPU. NPU-only build |
+| [`LFM2-1.2B-int4-cw-ov`](https://huggingface.co/aweussom/LFM2-1.2B-int4-cw-ov) | 36.5 tok/s | NPU-only build |
+| [`Qwen2.5-VL-3B-Instruct-int8-ov`](https://huggingface.co/aweussom/Qwen2.5-VL-3B-Instruct-int8-ov) | — (GPU VLM) | The proven small vision model, now a download instead of a 10-min conversion. Research license |
+| [`LFM2-8B-A1B-int4-ov`](https://huggingface.co/aweussom/LFM2-8B-A1B-int4-ov) | — (GPU MoE) | 197 tok/s resident on an Arc 140V; the disk-offload test model |
+
+The NPU builds are **channel-wise** exports (`-cw`) on purpose: the default
+group-quantized int4 that `optimum-cli` produces crashes the Intel NPU
+driver compiler (a known vpux bug — `"Found N duplicated names"`). If you
+convert your own models for the NPU, use `download-model.ps1 -Weight
+int4-cw` (or `int8-cw`), which encodes the working recipe.
+
+## Big MoE models on small GPUs (disk offload)
+
+OpenVINO 2026.3 can stream Mixture-of-Experts weights from disk instead of
+keeping them GPU-resident. NoLlama exposes it as `--offload-ratio PCT`
+(GPU slots). Measured on an Arc 140V (16 GB) laptop, Qwen3-30B-A3B INT4 —
+a 15.2 GB model that doesn't fit resident at all:
+
+| `--offload-ratio` | Resident GPU memory | Decode |
+|---|---|---|
+| 30 | 10.8 GB | 4.9 tok/s |
+| 50 | 8.1 GB | 5.4 tok/s |
+| 90 | **2.35 GB** | 2.5 tok/s |
+
+Pick the **smallest ratio that fits** your memory. Set expectations
+honestly: offload makes 30B-class quality *possible* on a laptop
+(batch/overnight work, careful Q&A) — it does not make it interactive.
+**Requires an XMX-capable GPU** (Arc, Lunar Lake and newer — `install.ps1`
+tells you at device detection); on iGPUs without XMX the feature silently
+does nothing, and NoLlama warns at startup instead of letting you believe
+your model got smaller.
+
 ## What it does
 
 - **OpenAI API** (`/v1/chat/completions`) — works with any OpenAI client, OpenWebUI, etc.
@@ -97,6 +140,7 @@ users see them flagged **"Already on disk"** (those link instantly).
 - **Dual device** — NPU for chat + GPU for vision, simultaneously
 - **Tool calling / agents** (GPU/iGPU + CPU, not NPU) — works with VS Code Copilot Chat and OpenClaw; the model drives tools on the ARC GPU or a strong CPU
 - **Prefix caching** (on by default) — a repeated prompt prefix (e.g. an agent's fixed system prompt) is prefilled once, not every turn — ~47× faster on cached turns
+- **MoE disk offload** (`--offload-ratio`) — run 30B-class MoE models on 16 GB-class XMX GPUs by streaming expert weights from disk (verified: 2.35 GB resident for a 15.2 GB model)
 - **Built-in web UI** — chat, image drop zone, model selector, dark theme
 - **Model menu** — curated list of verified models, no conversion nightmares
 
