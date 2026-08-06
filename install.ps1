@@ -531,12 +531,19 @@ Write-Host ""
 Write-Host "=== What will you use NoLlama for? ===" -ForegroundColor Cyan
 Write-Host ""
 $cases = @()
-$cases += [PSCustomObject]@{ Key = "chat";   Label = "Chat";         Desc = "text assistant" }
-$cases += [PSCustomObject]@{ Key = "agent";  Label = "Coding agent"; Desc = "OpenClaw / VS Code Copilot (tool-calling)" }
+# Labels lead with the device map — "[NPU] Chat + [GPU] Vision" tells you
+# what runs where, which is the actual decision being made (user feedback).
+# Combos pin chat to NPU (CPU when absent); single-purpose options let you
+# pick the device on the next screen.
+$chatDevices  = @(); if ($HasNPU) { $chatDevices += "NPU" }; if ($HasGPU) { $chatDevices += "GPU" }; $chatDevices += "CPU"
+$agentDevices = @(); if ($HasGPU) { $agentDevices += "GPU" }; $agentDevices += "CPU"
+$comboChatDev = if ($HasNPU) { "NPU" } else { "CPU" }
+$cases += [PSCustomObject]@{ Key = "chat";   Label = "Chat";         Desc = "text assistant (you pick the device next: $($chatDevices -join '/'))" }
+$cases += [PSCustomObject]@{ Key = "agent";  Label = "Coding agent"; Desc = "OpenClaw / VS Code Copilot, tool-calling (pick GPU or CPU next)" }
 if ($HasGPU) {
-    $cases += [PSCustomObject]@{ Key = "vision";      Label = "Vision";             Desc = "image understanding (GPU)" }
-    $cases += [PSCustomObject]@{ Key = "chat+agent";  Label = "Chat + Coding agent"; Desc = "chat model + a GPU coder, together" }
-    $cases += [PSCustomObject]@{ Key = "chat+vision"; Label = "Chat + Vision";       Desc = "chat model + GPU vision (classic)" }
+    $cases += [PSCustomObject]@{ Key = "vision";      Label = "[GPU] Vision + chat"; Desc = "image understanding; a vision model answers plain chat too" }
+    $cases += [PSCustomObject]@{ Key = "chat+agent";  Label = "[$comboChatDev] Chat + [GPU] Coding agent"; Desc = "two models, one server" }
+    $cases += [PSCustomObject]@{ Key = "chat+vision"; Label = "[$comboChatDev] Chat + [GPU] Vision";       Desc = "two models, one server (the classic NoLlama setup)" }
 }
 for ($i = 0; $i -lt $cases.Count; $i++) {
     Write-Host ("  {0}. {1}" -f ($i + 1), $cases[$i].Label) -NoNewline
@@ -551,8 +558,6 @@ while ($null -eq $useKey) {
     else { Write-Host "Enter 1-$($cases.Count)" -ForegroundColor Red }
 }
 
-$chatDevices  = @(); if ($HasNPU) { $chatDevices += "NPU" }; if ($HasGPU) { $chatDevices += "GPU" }; $chatDevices += "CPU"
-$agentDevices = @(); if ($HasGPU) { $agentDevices += "GPU" }; $agentDevices += "CPU"
 $coders = @($Registry.gpu_llm | Where-Object { $_.agent })   # OpenClaw/Copilot-ready
 $isAgent = $false
 
