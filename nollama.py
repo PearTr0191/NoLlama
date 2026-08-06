@@ -1519,6 +1519,30 @@ class WhisperSlot:
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 MAX_REQUEST_BYTES = 50 * 1024 * 1024  # 50 MB — enough for large base64 images
 HEARTBEAT_SECS = 15  # SSE keep-alive cadence during long prefill (big prompts / tool turns)
+
+# Default repetition penalty, overridable in nollama.ini ([generation] section)
+# next to this file. Ollama ships 1.1, which breaks thinking-loops faster but
+# is known to hurt code generation; 1.05 is the compromise default. Clients
+# that send their own penalties (OpenAI frequency/presence_penalty, Ollama
+# repeat_penalty) override this per-request — see apply_penalties().
+import configparser as _configparser
+_ini = _configparser.ConfigParser()
+_ini.read(Path(__file__).parent / "nollama.ini")
+REPETITION_PENALTY = _ini.getfloat("generation", "repetition_penalty", fallback=1.05)
+
+
+def apply_penalties(gen, repetition=None, frequency=None, presence=None):
+    """Set gen's penalties: per-request client values win over the
+    nollama.ini/default repetition penalty. frequency/presence map through
+    when this openvino-genai build supports them (CB pipelines do; the
+    static NPU pipeline may ignore them)."""
+    gen.repetition_penalty = repetition if repetition is not None else REPETITION_PENALTY
+    for attr, val in (("frequency_penalty", frequency), ("presence_penalty", presence)):
+        if val is not None:
+            try:
+                setattr(gen, attr, float(val))
+            except Exception:
+                pass
 PROMPT_CACHE = True   # prefix-KV caching on GPU/CPU LLM slots (set False via --no-prompt-cache)
 PROMPT_CACHE_GB = 2   # KV-cache pool size (GB) when prefix caching is on
 PREWARM_FILE = None   # path (--prewarm) to a saved prompt: prefilled at startup, auto-captured while serving
@@ -1989,7 +2013,10 @@ def chat_completions():
     else:
         gen.do_sample = False
         gen.top_k = 1
-    gen.repetition_penalty = 1.05
+    apply_penalties(gen,
+                    repetition=body.get("repetition_penalty"),
+                    frequency=body.get("frequency_penalty"),
+                    presence=body.get("presence_penalty"))
 
     completion_id = make_id()
     created = int(time.time())
@@ -2256,7 +2283,11 @@ def ollama_chat():
     else:
         gen.do_sample = False
         gen.top_k = 1
-    gen.repetition_penalty = 1.05
+    _opts = body.get("options", {})
+    apply_penalties(gen,
+                    repetition=_opts.get("repeat_penalty"),
+                    frequency=_opts.get("frequency_penalty"),
+                    presence=_opts.get("presence_penalty"))
 
     print(f"\n{datetime.now():%H:%M:%S} <- [{slot.device_name}] [Ollama] "
           f"{'image, ' if has_images else ''}{len(text_prompt)} chars"
@@ -2430,7 +2461,11 @@ def ollama_generate():
     else:
         gen.do_sample = False
         gen.top_k = 1
-    gen.repetition_penalty = 1.05
+    _opts = body.get("options", {})
+    apply_penalties(gen,
+                    repetition=_opts.get("repeat_penalty"),
+                    frequency=_opts.get("frequency_penalty"),
+                    presence=_opts.get("presence_penalty"))
 
     t0 = time.perf_counter()
 

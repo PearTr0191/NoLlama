@@ -331,6 +331,7 @@ body {
 }
 .btn:hover { opacity: 0.9; }
 .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.btn.stop { background: #c0392b; }
 .btn.icon {
     background: var(--input-bg);
     padding: 8px 10px;

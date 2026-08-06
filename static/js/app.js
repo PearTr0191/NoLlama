@@ -27,6 +27,18 @@ let thinkExpanded = false; // track think block expand state across re-renders
 let isGenerating = false;
 let abortController = null;
 
+// Send-button doubles as a visible Stop while generating (Escape still works).
+function setGenerating(on) {
+    isGenerating = on;
+    sendBtn.textContent = on ? 'Stop' : 'Send';
+    sendBtn.classList.toggle('stop', on);
+}
+
+function cancelGeneration() {
+    if (abortController) abortController.abort();
+    fetch('/v1/cancel', { method: 'POST' }).catch(() => {});
+}
+
 function shouldAutoScroll() {
     return chat.scrollHeight - chat.scrollTop - chat.clientHeight < 80;
 }
@@ -94,6 +106,10 @@ function buildRequestBody(overrides) {
         messages: messages,
         stream: true,
         max_tokens: 16384,
+        // The web UI is the "does it work" surface, and a thinking-loop on a
+        // slow iGPU reads as "it doesn't". Ollama's 1.1 breaks loops faster
+        // than the server default (1.05, kept mild for coding agents).
+        repetition_penalty: 1.1,
     };
 
     if (temp > 0) {
@@ -145,8 +161,7 @@ async function justAnswerMe(event) {
     // Create new assistant bubble and send
     const assistantDiv = addMessage('assistant', '');
     assistantDiv.innerHTML = '<span class="typing-indicator"></span>';
-    isGenerating = true;
-    sendBtn.disabled = true;
+    setGenerating(true);
     const t0 = performance.now();
 
     try {
@@ -227,8 +242,7 @@ async function justAnswerMe(event) {
             assistantDiv.innerHTML = `<span style="color:var(--error)">${escapeHtml(err.message)}</span>`;
         }
     } finally {
-        isGenerating = false;
-        sendBtn.disabled = false;
+        setGenerating(false);
         abortController = null;
         input.focus();
     }
@@ -396,8 +410,7 @@ async function sendMessage() {
     // Create assistant bubble with waiting indicator
     const assistantDiv = addMessage('assistant', '');
     assistantDiv.innerHTML = '<span class="typing-indicator"></span>';
-    isGenerating = true;
-    sendBtn.disabled = true;
+    setGenerating(true);
     const t0 = performance.now();
 
     // After 3s with no response, check if a model is reloading and show that
@@ -505,8 +518,7 @@ async function sendMessage() {
             assistantDiv.innerHTML = `<span style="color:var(--error)">${escapeHtml(err.message)}</span>`;
         }
     } finally {
-        isGenerating = false;
-        sendBtn.disabled = false;
+        setGenerating(false);
         abortController = null;
         input.focus();
     }
@@ -556,7 +568,17 @@ chat.addEventListener('click', (e) => {
 });
 
 // Send
-sendBtn.addEventListener('click', sendMessage);
+sendBtn.addEventListener('click', () => {
+    if (isGenerating) cancelGeneration();
+    else sendMessage();
+});
+
+// No-think defaults ON (slow devices + thinking models = runaway loops);
+// the user's choice sticks across sessions.
+noThinkCheckbox.checked = localStorage.getItem('nollama-no-think') !== 'off';
+noThinkCheckbox.addEventListener('change', () => {
+    localStorage.setItem('nollama-no-think', noThinkCheckbox.checked ? 'on' : 'off');
+});
 input.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault();
