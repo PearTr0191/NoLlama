@@ -118,7 +118,12 @@ for dev in core.get_available_devices():
     except: full = dev
     if dev.startswith('GPU'):
         if 'intel' not in full.lower(): continue
-        if 'GPU' not in out: out['GPU'] = {'id': dev, 'name': full}
+        if 'GPU' not in out:
+            # XMX (systolic) gates OpenVINO's MoE disk offload: without it,
+            # big MoE models must fit entirely in GPU memory (see TODONT.md).
+            try: caps = core.get_property(dev, 'OPTIMIZATION_CAPABILITIES')
+            except: caps = []
+            out['GPU'] = {'id': dev, 'name': full, 'xmx': 'GPU_HW_MATMUL' in caps}
     elif dev in ('NPU', 'CPU'):
         out[dev] = {'id': dev, 'name': full}
 print(json.dumps(out))
@@ -133,6 +138,12 @@ else         { Write-Host "  [-] NPU: not found" -ForegroundColor DarkGray }
 if ($HasGPU) {
     $gpuSuffix = if ($DeviceInfo.GPU.id -ne "GPU") { " [$($DeviceInfo.GPU.id)]" } else { "" }
     Write-Host "  [+] GPU$($gpuSuffix): $($DeviceInfo.GPU.name)" -ForegroundColor Green
+    if ($DeviceInfo.GPU.xmx) {
+        Write-Host "      XMX: yes — large MoE models can stream experts from disk (OpenVINO 2026.3+)" -ForegroundColor DarkGray
+    } else {
+        Write-Host "      XMX: no — MoE disk offload will NOT work on this GPU; models must fit" -ForegroundColor Yellow
+        Write-Host "      entirely in GPU memory. Size your model choice accordingly." -ForegroundColor Yellow
+    }
 } else {
     Write-Host "  [-] GPU: not found (non-Intel GPUs are filtered)" -ForegroundColor DarkGray
 }
