@@ -1,5 +1,19 @@
 # NEXT STEPS (2026-08-06, OpenVINO 2026.3 testing session)
 
+## EVENING RESOLUTION — offload CONFIRMED on Arc 140V (laptop)
+
+Qwen3-30B-A3B int4 runs in **2.35 GB resident** at ratio 90 (2.5 tok/s);
+LFM2-8B 4.10→0.70 GB. Old IRs fuse fine on XMX — vintage never mattered,
+only hardware. Shipped same evening: `--offload-ratio` flag (25541ae),
+loop defenses + UI stop button (f2131dd), six models published to HF
+(aweussom/: SmolLM3 ×2, LFM2-1.2B, LFM2.5-1.2B, LFM2-8B-A1B, Qwen2.5-VL-3B),
+registry updated, #19 updated with measured numbers.
+
+OPEN: ratio/speed knee for 30B on 140V (try 30/50); Qwen3.5-4B vision
+verdict for the registry note; SmolLM3 registry notes could mention
+thinking-mode + /no_think; desktop swap-raise is NOT needed (offload can't
+work there — no XMX).
+
 ## OFFLOAD INVESTIGATION: CLOSED — root cause found, swap raise NOT needed
 
 `OFFLOAD_RATIO` requires an **XMX-capable GPU**: the MoE fusion it depends on is gated
