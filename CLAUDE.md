@@ -152,9 +152,10 @@ NoLlama warns at startup. Verified on Arc 140V, Qwen3-30B-A3B int4
 steady-state: ratio 30 → 10.8 GB resident @ 25.3 tok/s (interactive!);
 90 → 2.35 GB @ 5.1. Pick the smallest ratio that fits. The expert LRU
 needs ~60 tokens to warm — benchmark steady-state, not first-sentence.
-Known upstream bug: a SECOND generate() on an offload-active pipeline
-hangs in native code (uninterruptible); NoLlama serves sequential requests
-on one pipeline, so this needs watching in real use. Non-XMX iGPUs can't
+Known upstream bug: a SECOND generate() on an offload-active PLAIN
+pipeline hangs in native code (uninterruptible). NoLlama's serving path is
+unaffected — the CB backend it uses was verified with sequential requests
+(140V, ratio 30: 12.5 then 15.9 tok/s, prefix cache TTFT 8.0s→1.9s). Non-XMX iGPUs can't
 load big MoE at all (USM staging OOM) — full story in TODONT.md.
 
 ## NPU export rule (2026-08-06)
