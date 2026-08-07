@@ -28,8 +28,19 @@ The models themselves are good: `gemma-4-26b-a4b-it-int4-ov` (VLM MoE,
 16 s load. E4B int8 does 13.0 on CPU. Gemma 4 belongs in the CPU/GPU
 columns, not the NPU column.
 
+**Update 2026-08-07 (laptop NPU4, Arc 140V machine):** same E4B int8 on
+the newer NPU generation produces **coherent** output — but at
+**0.1 tok/s** (8 minutes per answer, three consistent runs). So two
+separate defects: the numerical garbage is specific to the older NPU
+arch/driver (3720 wrong, NPU4 right), while the speed is broken on BOTH
+generations (0.1-0.5 tok/s smells like most of the graph falling back off
+the NPU via NPUW partitioning). Verdict unchanged — no Gemma 4 on any NPU
+we own — but the upstream report can now be precise: wrong-on-3720,
+~100x-too-slow-everywhere. For comparison the same file does 16.4 tok/s
+on the same laptop's GPU and 13.0 on the desktop CPU.
+
 Re-evaluate if: an NPU driver or openvino release notes gemma4 fixes —
-retest is `vlm_bench`-style, three minutes; or Intel ships a
+retest is `scripts/vlm-bench.py`, three minutes; or Intel ships a
 `-int4-cw-ov` build of a gemma-4 (none exist today, unlike gemma-3).
 
 ## OFFLOAD_RATIO (2026.3 MoE disk offload) on the desktop 285K iGPU (2026-08-06)
