@@ -106,7 +106,7 @@ try:
             return False
 
         t1 = time.time()
-        pipe.generate("Say hello in one short sentence.", cfg, meter)
+        pipe.generate("Explain what a hash map is and when to use one.", cfg, meter)
         out = "".join(chunks)
         n = len(stamps)
         if n >= 32:
@@ -120,15 +120,29 @@ try:
             print(f"OK: {n} tokens in {time.time()-t1:.1f}s "
                   f"-> {n/(time.time()-t1):.1f} tok/s (too short to split)", flush=True)
     else:
+        # Count real tokens via streamer — a model that answers briefly and
+        # hits EOS would otherwise inflate the rate (64/dt for a 4-token
+        # "Hello!" reported 645 tok/s once). The prompt is chosen to
+        # reliably out-generate the 64-token budget.
         rates = []
         out = ""
         for i in range(3):
+            stamps = []
+            chunks = []
+
+            def meter(sub):
+                stamps.append(time.time())
+                chunks.append(sub)
+                return False
+
             t1 = time.time()
-            out = pipe.generate("Say hello in one short sentence.", cfg)
+            pipe.generate("Explain what a hash map is and when to use one.", cfg, meter)
+            out = "".join(chunks)
+            n = len(stamps)
             dt = time.time() - t1
-            rate = 64 / dt
+            rate = (n - 1) / (stamps[-1] - stamps[0]) if n > 1 else 0
             label = "warm-up" if i == 0 else f"run {i}"
-            print(f"  {label}: 64 tokens in {dt:.1f}s -> {rate:.1f} tok/s", flush=True)
+            print(f"  {label}: {n} tokens in {dt:.1f}s -> {rate:.1f} tok/s", flush=True)
             if i > 0:
                 rates.append(rate)
         steady = sorted(rates)[len(rates) // 2]
