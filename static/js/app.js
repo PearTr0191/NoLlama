@@ -612,6 +612,18 @@ document.addEventListener('paste', (e) => {
             return;
         }
     }
+    // Images copied from web pages often arrive as a text/html flavor with a
+    // data: URL and no image/ item — without this, the whole base64 string
+    // lands in the input box as text.
+    const dataUrl = (e.clipboardData.getData('text/html') + ' ' +
+                     e.clipboardData.getData('text/plain'))
+        .match(/data:image\/(?:png|jpe?g|gif|webp);base64,[A-Za-z0-9+/=]+/);
+    if (dataUrl) {
+        e.preventDefault();
+        attachedImage = dataUrl[0];
+        previewImg.src = attachedImage;
+        imagePreview.style.display = 'block';
+    }
 });
 
 // Drag and drop
