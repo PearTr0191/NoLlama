@@ -543,6 +543,10 @@ function attachImage(file) {
         attachedImage = reader.result;
         previewImg.src = attachedImage;
         imagePreview.style.display = 'block';
+        // Attach-image-first leaves focus on the attach button (or wherever
+        // the paste happened) — keystrokes then go nowhere and the input
+        // feels dead. Hand focus to the box the user will type in next.
+        input.focus();
     };
     reader.readAsDataURL(file);
 }
@@ -627,6 +631,7 @@ document.addEventListener('paste', (e) => {
         attachedImage = dataUrl[0];
         previewImg.src = attachedImage;
         imagePreview.style.display = 'block';
+        input.focus();
     }
 });
 
