@@ -83,15 +83,29 @@ report_memory("post-load")
 
 cfg = og.GenerationConfig()
 cfg.max_new_tokens = 64
-t1 = time.time()
+# Run 1 pays the bills — CPU faults weights in lazily, and offloaded GPU
+# runs start with a cold expert LRU — so it's reported as warm-up and the
+# verdict is the median of the remaining runs.
+RUNS = 3
+rates = []
+out = ""
 try:
-    out = pipe.generate("Say hello in one short sentence.", cfg)
-    dt = time.time() - t1
-    print(f"OK: 64 tokens in {dt:.1f}s -> {64/dt:.1f} tok/s", flush=True)
+    for i in range(RUNS):
+        t1 = time.time()
+        out = pipe.generate("Say hello in one short sentence.", cfg)
+        dt = time.time() - t1
+        rate = 64 / dt
+        label = "warm-up" if i == 0 else f"run {i}"
+        print(f"  {label}: 64 tokens in {dt:.1f}s -> {rate:.1f} tok/s", flush=True)
+        if i > 0:
+            rates.append(rate)
+    steady = sorted(rates)[len(rates) // 2]
+    print(f"OK: steady-state {steady:.1f} tok/s "
+          f"(median of {len(rates)} post-warm-up runs)", flush=True)
     report_memory("post-generate")
     print("OUTPUT:", str(out)[:200], flush=True)
     print(f"RESULT: ratio={RATIO} load+generate succeeded", flush=True)
 except Exception:
-    print(f"GENERATION FAILED after {time.time()-t1:.1f}s:", flush=True)
+    print("GENERATION FAILED:", flush=True)
     traceback.print_exc()
     sys.exit(1)
