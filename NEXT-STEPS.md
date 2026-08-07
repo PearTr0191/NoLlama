@@ -1,4 +1,18 @@
-# NEXT STEPS (2026-08-06, OpenVINO 2026.3 testing session)
+# NEXT STEPS (2026-08-06/07, OpenVINO 2026.3 testing session)
+
+## 2026-08-07 HEADLINE — model-bigger-than-RAM works on CPU
+
+Qwen3-Coder-Next int8 (74.4 GB, Dmitriy's HF upload, integrity verified
+here) on the 64 GB 285K desktop, plain CPU, no flags: loads in 84 s,
+**steady-state 11.5 tok/s**, resident stabilizes at ~35 GB (committed 78).
+Only the hot experts (10 of 512 active/token) stay in RAM; cold experts
+page from SSD. The A3B access pattern makes >RAM models viable on CPU —
+faster than the laptop's GPU-offload on a model HALF the size. This
+supersedes the 08-06 working-set-cap caveat: real scarcity with real
+access patterns behaves BETTER than the artificial cap suggested.
+Full-day device matrix (same-family MoE): desktop CPU 23.7 (30B, fits) /
+11.5 (74B, doesn't fit); laptop CPU 9.1 (30B); laptop GPU offload 25.3
+(30B ratio 30); non-XMX iGPU: nothing.
 
 ## EVENING RESOLUTION — offload CONFIRMED on Arc 140V (laptop)
 
