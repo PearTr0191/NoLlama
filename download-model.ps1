@@ -95,19 +95,26 @@ if ($Convert) {
 Write-Host ""
 
 if (Test-Path $Output) {
-    Write-Host "Target directory already exists: $Output" -ForegroundColor Yellow
-    $reply = Read-Host "Overwrite? [y/N]"
-    if ($reply -notin @("y", "Y", "yes")) {
-        Write-Host "Aborted."
-        exit 0
-    }
-    $item = Get-Item $Output -Force
-    if ($item.LinkType) {
-        # Remove link without following.
-        if ($IsWindows) { cmd /c rmdir "`"$Output`"" | Out-Null }
-        else            { Remove-Item -Force $Output }
+    if (-not $Convert) {
+        # Plain downloads RESUME: hf skips complete files and continues
+        # partial ones. Deleting here (the old behavior) forced a full
+        # re-download after every interrupted attempt.
+        Write-Host "Target directory exists — resuming/refreshing download into it." -ForegroundColor Yellow
     } else {
-        Remove-Item -Recurse -Force $Output
+        Write-Host "Target directory already exists: $Output" -ForegroundColor Yellow
+        $reply = Read-Host "Overwrite? [y/N]"
+        if ($reply -notin @("y", "Y", "yes")) {
+            Write-Host "Aborted."
+            exit 0
+        }
+        $item = Get-Item $Output -Force
+        if ($item.LinkType) {
+            # Remove link without following.
+            if ($IsWindows) { cmd /c rmdir "`"$Output`"" | Out-Null }
+            else            { Remove-Item -Force $Output }
+        } else {
+            Remove-Item -Recurse -Force $Output
+        }
     }
 }
 
@@ -157,6 +164,20 @@ if ($Convert) {
         Write-Host "  If 401/403: pass -HfToken hf_xxx (or run 'hf auth login' first)" -ForegroundColor Yellow
         exit 1
     }
+}
+
+# Verify what actually landed — an interrupted download leaves a truncated
+# .bin that fails at load with a cryptic "Empty weights data" error (#17).
+# --scan reads the IR's own weight-size records and says so in plain words.
+Write-Host ""
+$scanOut = & python (Join-Path $ScriptDir "nollama.py") --scan $Output 2>&1
+$scanOut | Write-Host
+if ($scanOut -match "PROBLEM") {
+    Write-Host ""
+    Write-Host "ERROR: The downloaded model failed the integrity check (see PROBLEM above)." -ForegroundColor Red
+    Write-Host "  Usually an interrupted download. Re-run this script — the download" -ForegroundColor Yellow
+    Write-Host "  resumes into the existing directory (complete files are skipped)." -ForegroundColor Yellow
+    exit 1
 }
 
 Write-Host ""
