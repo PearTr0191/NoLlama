@@ -3,8 +3,10 @@
 ## 2026-08-07 HEADLINE — model-bigger-than-RAM works on CPU
 
 Qwen3-Coder-Next int8 (74.4 GB, Dmitriy's HF upload, integrity verified
-here) on the 64 GB 285K desktop, plain CPU, no flags: loads in 84 s,
-**steady-state 11.5 tok/s**, resident stabilizes at ~35 GB (committed 78).
+here) on the 64 GB 285K desktop, plain CPU, no flags: loads in ~75-85 s,
+**steady-state 8.8-11.5 tok/s depending on OS page-cache warmth** (cold
+cache after eviction → 8.8; warm after download → 11.5), resident
+stabilizes at ~29-35 GB (committed 78).
 Only the hot experts (10 of 512 active/token) stay in RAM; cold experts
 page from SSD. The A3B access pattern makes >RAM models viable on CPU —
 faster than the laptop's GPU-offload on a model HALF the size. This
