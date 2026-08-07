@@ -103,3 +103,9 @@ Consequences:
   before offload matters (even 11.6 GB on the 33 GB iGPU); old-vintage IRs additionally
   can't fuse to MOECompressed. Mechanism notes in TODONT.md.
 - Qwen3.6-35B-A3B: NPU dead (shape inference), iGPU dead (staging OOM). Parked.
+
+CUDA column (2026-08-07): Ollama qwen3-coder-next Q4 (53 GB) on RTX 5090
+32 GB + CPU auto-split (58/42): **70-75 tok/s decode**, prefill ~265 tok/s
+warm. 6-8x the OpenVINO-CPU route for the same model family (different
+quant: Q4 vs int8 — best-route-per-stack, not controlled A/B). Untuned;
+llama-server with --n-cpu-moe expert pinning would likely add more.
