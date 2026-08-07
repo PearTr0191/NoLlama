@@ -35,7 +35,9 @@ vs 26.6 resident. So VLMPipeline forwards OFFLOAD_RATIO and it engages;
 the desktop 35B failures were XMX-only after all. Side-finding: VLM slots
 use the PLAIN pipeline, and two sequential generates with offload active
 did NOT hang — the second-generate hang is therefore LLMPipeline-specific,
-not plain-pipeline-general. (Entry below is about Gemma-on-NPU.)
+not plain-pipeline-general. Vision also verified under offload: an image
+request (XKCD strip) answered correctly at 8.9 tok/s — the vision encoder
+is not expert weights, stays resident, works. (Entry below is Gemma-on-NPU.)
 
 **Update 2026-08-07 (laptop NPU4, Arc 140V machine):** same E4B int8 on
 the newer NPU generation produces **coherent** output — but at
