@@ -84,24 +84,56 @@ report_memory("post-load")
 cfg = og.GenerationConfig()
 cfg.max_new_tokens = 64
 # Run 1 pays the bills — CPU faults weights in lazily, and offloaded GPU
-# runs start with a cold expert LRU — so it's reported as warm-up and the
-# verdict is the median of the remaining runs.
-RUNS = 3
-rates = []
-out = ""
+# runs start with a cold expert LRU — so warm-up must be excluded from the
+# verdict. Two strategies:
+#
+# - Offload ACTIVE (GPU + ratio>0): ONE long generate, per-token timing via
+#   streamer; first third is warm-up, steady-state = rate over the last
+#   half. (A second generate() on an offload-active pipeline hangs in
+#   native code — observed on Arc 140V, genai 2026.3, Qwen3-30B ratio 50,
+#   uninterruptible by Ctrl-C — so multi-run is not an option there.)
+# - Otherwise: 3 generates; first labeled warm-up, verdict = median of the
+#   rest.
 try:
-    for i in range(RUNS):
+    if DEVICE.startswith("GPU") and RATIO > 0:
+        cfg.max_new_tokens = 192
+        stamps = []
+        chunks = []
+
+        def meter(sub):
+            stamps.append(time.time())
+            chunks.append(sub)
+            return False
+
         t1 = time.time()
-        out = pipe.generate("Say hello in one short sentence.", cfg)
-        dt = time.time() - t1
-        rate = 64 / dt
-        label = "warm-up" if i == 0 else f"run {i}"
-        print(f"  {label}: 64 tokens in {dt:.1f}s -> {rate:.1f} tok/s", flush=True)
-        if i > 0:
-            rates.append(rate)
-    steady = sorted(rates)[len(rates) // 2]
-    print(f"OK: steady-state {steady:.1f} tok/s "
-          f"(median of {len(rates)} post-warm-up runs)", flush=True)
+        pipe.generate("Say hello in one short sentence.", cfg, meter)
+        out = "".join(chunks)
+        n = len(stamps)
+        if n >= 32:
+            third, half = n // 3, n // 2
+            warm = third / (stamps[third - 1] - t1)
+            steady = (n - half) / (stamps[-1] - stamps[half - 1])
+            print(f"  warm-up (first {third} tokens): {warm:.1f} tok/s", flush=True)
+            print(f"OK: steady-state {steady:.1f} tok/s "
+                  f"(last {n - half} of {n} tokens, single pass)", flush=True)
+        else:
+            print(f"OK: {n} tokens in {time.time()-t1:.1f}s "
+                  f"-> {n/(time.time()-t1):.1f} tok/s (too short to split)", flush=True)
+    else:
+        rates = []
+        out = ""
+        for i in range(3):
+            t1 = time.time()
+            out = pipe.generate("Say hello in one short sentence.", cfg)
+            dt = time.time() - t1
+            rate = 64 / dt
+            label = "warm-up" if i == 0 else f"run {i}"
+            print(f"  {label}: 64 tokens in {dt:.1f}s -> {rate:.1f} tok/s", flush=True)
+            if i > 0:
+                rates.append(rate)
+        steady = sorted(rates)[len(rates) // 2]
+        print(f"OK: steady-state {steady:.1f} tok/s "
+              f"(median of {len(rates)} post-warm-up runs)", flush=True)
     report_memory("post-generate")
     print("OUTPUT:", str(out)[:200], flush=True)
     print(f"RESULT: ratio={RATIO} load+generate succeeded", flush=True)
