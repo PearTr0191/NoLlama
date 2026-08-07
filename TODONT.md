@@ -28,6 +28,15 @@ The models themselves are good: `gemma-4-26b-a4b-it-int4-ov` (VLM MoE,
 16 s load. E4B int8 does 13.0 on CPU. Gemma 4 belongs in the CPU/GPU
 columns, not the NPU column.
 
+**Update 2026-08-07 (VLM + offload premiere, same 140V):**
+`gemma-4-26b-a4b` served through NoLlama with `--offload-ratio 30` works —
+7.9 tok/s on the cold first request, 12.5 on the second (LRU warming),
+vs 26.6 resident. So VLMPipeline forwards OFFLOAD_RATIO and it engages;
+the desktop 35B failures were XMX-only after all. Side-finding: VLM slots
+use the PLAIN pipeline, and two sequential generates with offload active
+did NOT hang — the second-generate hang is therefore LLMPipeline-specific,
+not plain-pipeline-general. (Entry below is about Gemma-on-NPU.)
+
 **Update 2026-08-07 (laptop NPU4, Arc 140V machine):** same E4B int8 on
 the newer NPU generation produces **coherent** output — but at
 **0.1 tok/s** (8 minutes per answer, three consistent runs). So two
