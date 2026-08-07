@@ -15,3 +15,6 @@ optimum-intel[openvino]>=1.27.0
 transformers>=4.57.0,<5
 accelerate>=1.0.0
 huggingface_hub>=0.36.0
+# Required for downloading files >50 GB (hf refuses plain HTTP for them),
+# and faster for everything else. Discovered via a 74 GB Qwen3-Coder-Next.
+hf_xet
