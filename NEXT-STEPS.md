@@ -16,13 +16,13 @@ Reframed: offload at moderate ratios IS interactive on XMX laptops.
 LFM2-8B resident on 140V: 86.8 tok/s (earlier 197/645 were a token-count
 bug — model EOS'd at 4 tokens, script assumed 64).
 
-MUST-VERIFY before recommending --offload-ratio in production: a second
-generate() on an offload-active PLAIN pipeline hangs in native code
-(uninterruptible; 140V, 30B ratio 50). NoLlama's GPU LLM slots use the CB
-backend, which may or may not share the bug — test: start nollama.py
---offload-ratio 30 on the laptop, send TWO chat requests. If the second
-hangs, the flag needs a guard (or pipeline recreation per request).
-Upstream repro worth filing on openvino.genai either way.
+VERIFIED 2026-08-07 ~08:46: the CB backend does NOT share the plain-
+pipeline second-generate hang — nollama.py --offload-ratio 30 on the 140V
+served two sequential chat requests (355 tok @ 12.5 tok/s, then 242 tok @
+15.9 tok/s, TTFT 8.0s → 1.9s thanks to prefix caching). The flag is
+production-safe. The plain-pipeline hang remains upstream-repro-worthy
+(only affects scripts using LLMPipeline without scheduler_config).
+Preflight memory warning now acknowledges offload instead of crying wolf.
 
 LATE-NIGHT ADDENDUM — big MoE on CPU (285K, 2026-08-07 00:xx):
 - Qwen3-30B-A3B int4 on the 285K CPU: **23.7 tok/s, TTFT 458 ms** — fully

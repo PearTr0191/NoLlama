@@ -1137,14 +1137,27 @@ class DeviceSlot:
                    else 0)
         need = (weights + kv_pool) * 1.1  # ~10% runtime/activation overhead
         if need > mem:
-            hint = ("use a smaller quant or lower --cache-size-gb"
-                    if self.device_name == "CPU" else
-                    "raise the iGPU budget (Intel Graphics Software -> Shared GPU "
-                    "Memory Override), use a smaller quant, or lower --cache-size-gb")
-            print(f"  [{self.device_name}] WARNING: model (~{weights / gib:.1f} GB)"
-                  f"{f' + KV pool ({kv_pool // gib} GB)' if kv_pool else ''} needs "
-                  f"~{need / gib:.1f} GB but the device budget is {mem / gib:.1f} GB "
-                  f"— this will likely NOT work ({hint})", flush=True)
+            if OFFLOAD_RATIO and self.device_name == "GPU":
+                # MoE disk offload keeps only part of the expert weights
+                # resident; the estimate above ignores that (expert share
+                # isn't knowable from config geometry alone). Inform, don't
+                # cry wolf — a 15.2 GB MoE serves fine on a 16 GB iGPU at
+                # --offload-ratio 30 (measured).
+                print(f"  [{self.device_name}] model (~{weights / gib:.1f} GB)"
+                      f"{f' + KV pool ({kv_pool // gib} GB)' if kv_pool else ''} "
+                      f"exceeds the {mem / gib:.1f} GB device budget, but "
+                      f"--offload-ratio {OFFLOAD_RATIO} keeps only part of it "
+                      f"resident — MoE models will likely fit; dense models "
+                      f"will not (offload only covers MoE experts)", flush=True)
+            else:
+                hint = ("use a smaller quant or lower --cache-size-gb"
+                        if self.device_name == "CPU" else
+                        "raise the iGPU budget (Intel Graphics Software -> Shared GPU "
+                        "Memory Override), use a smaller quant, or lower --cache-size-gb")
+                print(f"  [{self.device_name}] WARNING: model (~{weights / gib:.1f} GB)"
+                      f"{f' + KV pool ({kv_pool // gib} GB)' if kv_pool else ''} needs "
+                      f"~{need / gib:.1f} GB but the device budget is {mem / gib:.1f} GB "
+                      f"— this will likely NOT work ({hint})", flush=True)
         if kv_pool:
             per_tok = _kv_bytes_per_token(self.model_dir)
             if per_tok:
