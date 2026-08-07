@@ -135,6 +135,27 @@ territory. **Requires an XMX-capable GPU** (Arc, Lunar Lake and newer —
 feature silently does nothing, and NoLlama warns at startup instead of
 letting you believe your model got smaller.
 
+### Where does your hardware land? (big-MoE routes, measured 2026-08)
+
+Same model family (Qwen3 MoE, A3B-class), steady-state decode, best route
+per hardware class — including a CUDA flagship for perspective. Mixed
+quants and sizes, so read it as *routes*, not a controlled A/B:
+
+| Hardware | Stack & route | Model | tok/s |
+|---|---|---|---|
+| RTX 5090 32 GB + CPU (hybrid auto-split) | Ollama/CUDA | Coder-Next Q4, 53 GB | **~73** |
+| Arc 140V laptop iGPU, `--offload-ratio 30` | NoLlama/OpenVINO | 30B-A3B int4, 15 GB | 25.3 |
+| 24-core desktop CPU (64 GB RAM), model fits | NoLlama/OpenVINO | 30B-A3B int4 | 23.7 |
+| 24-core desktop CPU, model **bigger than RAM** | NoLlama/OpenVINO | Coder-Next int8, **74 GB** | 9-11.5 |
+| 8-core laptop CPU (LPDDR5X) | NoLlama/OpenVINO | 30B-A3B int4 | 9.1 |
+| Non-XMX desktop iGPU | — | any big MoE | won't load |
+
+Takeaways: a dedicated CUDA card is still ~3× the best Intel route — but
+every Intel row above is *usable*, runs on hardware you may already own,
+and two of them (offload, bigger-than-RAM CPU) were impossible before
+OpenVINO 2026.3 and the MoE era. Decode is the whole story here; on
+thinking models multiply by your patience.
+
 ## What it does
 
 - **OpenAI API** (`/v1/chat/completions`) — works with any OpenAI client, OpenWebUI, etc.
