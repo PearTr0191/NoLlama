@@ -67,11 +67,18 @@
 
     "gpu_vlm": [
         {
-            "name": "Qwen3.5 4B (INT4)",
-            "hf_id": "OpenVINO/Qwen3.5-4B-int4-ov",
+            "name": "Gemma 4 26B-A4B (INT4)",
+            "hf_id": "OpenVINO/gemma-4-26b-a4b-it-int4-ov",
             "source": "pre-exported",
-            "est_size_gb": 4,
-            "notes": "Experimental. Newest Qwen generation, natively multimodal (image-text-to-text) — full VLM on GPU. Untested here; needs OpenVINO 2026.2+."
+            "est_size_gb": 15,
+            "notes": "Multimodal MoE (128 experts, ~4B active). Verified 2026-08-07: 26.6 tok/s resident on Arc 140V (needs XMX — non-XMX iGPUs can't load it), 21.0 tok/s on a 24-core CPU. 262k context."
+        },
+        {
+            "name": "Gemma 4 E4B (INT8)",
+            "hf_id": "OpenVINO/gemma-4-E4B-it-int8-ov",
+            "source": "pre-exported",
+            "est_size_gb": 8,
+            "notes": "Multimodal edge model. Verified 2026-08-07: 16.4 tok/s on Arc 140V, ~13 on CPU and non-XMX iGPU. Do NOT run on NPU (garbage or 0.1 tok/s — see TODONT.md)."
         },
         {
             "name": "Qwen3.5 9B (INT4)",
