@@ -9,11 +9,20 @@ loop defenses + UI stop button (f2131dd), six models published to HF
 (aweussom/: SmolLM3 ×2, LFM2-1.2B, LFM2.5-1.2B, LFM2-8B-A1B, Qwen2.5-VL-3B),
 registry updated, #19 updated with measured numbers.
 
-Ratio sweep, Qwen3-30B on 140V (18 GB cap): 30 → 10.79 GB @ 4.9 tok/s;
-50 → 8.05 GB @ 5.4 tok/s; 90 → 2.35 GB @ 2.5 tok/s. Operating point ~50
-(30 is no faster — memory pressure near the cap eats the gain). Honest
-framing: offload makes 30B *possible* (overnight/batch quality), not
-interactive; resident 8B does 197 tok/s on the same GPU.
+Ratio sweep, Qwen3-30B on 140V — STEADY-STATE (2026-08-07 correction; the
+08-06 single-shot numbers were cold-LRU, 2-5× too low): 30 → 10.79 GB @
+**25.3 tok/s (interactive!)**; 50 → 8.05 GB @ 22.1; 90 → 2.35 GB @ 5.1.
+Reframed: offload at moderate ratios IS interactive on XMX laptops.
+LFM2-8B resident on 140V: 86.8 tok/s (earlier 197/645 were a token-count
+bug — model EOS'd at 4 tokens, script assumed 64).
+
+MUST-VERIFY before recommending --offload-ratio in production: a second
+generate() on an offload-active PLAIN pipeline hangs in native code
+(uninterruptible; 140V, 30B ratio 50). NoLlama's GPU LLM slots use the CB
+backend, which may or may not share the bug — test: start nollama.py
+--offload-ratio 30 on the laptop, send TWO chat requests. If the second
+hangs, the flag needs a guard (or pipeline recreation per request).
+Upstream repro worth filing on openvino.genai either way.
 
 LATE-NIGHT ADDENDUM — big MoE on CPU (285K, 2026-08-07 00:xx):
 - Qwen3-30B-A3B int4 on the 285K CPU: **23.7 tok/s, TTFT 458 ms** — fully

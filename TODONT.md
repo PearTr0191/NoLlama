@@ -78,6 +78,21 @@ the feature itself is real, first reproduction outside Intel we know of.
 NoLlama grew `--offload-ratio` the same evening, with a startup warning on
 non-XMX GPUs. install.ps1 surfaces XMX at device detection.
 
+**Update 2026-08-07 (steady-state correction — the evening numbers above
+were 2-5× too pessimistic):** the offload LRU needs ~60 tokens to warm,
+and single-generate measurements reported cold-cache speed as the verdict.
+Proper steady-state on the 140V, Qwen3-30B int4: ratio 30 → **25.3 tok/s**
+(interactive — matches the 24-core desktop CPU running the same model
+resident), 50 → 22.1, 90 → 5.1. Two benchmark bugs fixed the same morning:
+warm-up contamination, and rate computed from ASSUMED token counts (a
+4-token "Hello!" + EOS once reported 645 tok/s — real LFM2-8B GPU number
+is 86.8). Also found: **a second generate() on an offload-active plain
+pipeline hangs in native code, uninterruptible** (140V, 30B ratio 50) —
+upstream-repro-worthy, and it means NoLlama's own `--offload-ratio` serving
+path (which reuses one pipeline across requests, though via the CB backend,
+not the plain pipeline) MUST be verified with two sequential chat requests
+before recommending the flag in production.
+
 ## int8 exports of LFM2 / LFM2.5 for the NPU (2026-08-06)
 
 Idea: channel-wise int4 is the lossiest int4 variant and the NPU forces it,

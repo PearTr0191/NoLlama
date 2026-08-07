@@ -101,7 +101,7 @@ All are in the `install.ps1` menu, with measured numbers on real hardware:
 | [`LFM2.5-1.2B-Instruct-int4-cw-ov`](https://huggingface.co/aweussom/LFM2.5-1.2B-Instruct-int4-cw-ov) | **38.8 tok/s** | Fastest model we've verified on an NPU. NPU-only build |
 | [`LFM2-1.2B-int4-cw-ov`](https://huggingface.co/aweussom/LFM2-1.2B-int4-cw-ov) | 36.5 tok/s | NPU-only build |
 | [`Qwen2.5-VL-3B-Instruct-int8-ov`](https://huggingface.co/aweussom/Qwen2.5-VL-3B-Instruct-int8-ov) | — (GPU VLM) | The proven small vision model, now a download instead of a 10-min conversion. Research license |
-| [`LFM2-8B-A1B-int4-ov`](https://huggingface.co/aweussom/LFM2-8B-A1B-int4-ov) | — (GPU MoE) | 197 tok/s resident on an Arc 140V; the disk-offload test model |
+| [`LFM2-8B-A1B-int4-ov`](https://huggingface.co/aweussom/LFM2-8B-A1B-int4-ov) | — (GPU MoE) | 87 tok/s resident on an Arc 140V; the disk-offload test model |
 
 The NPU builds are **channel-wise** exports (`-cw`) on purpose: the default
 group-quantized int4 that `optimum-cli` produces crashes the Intel NPU
@@ -116,19 +116,24 @@ keeping them GPU-resident. NoLlama exposes it as `--offload-ratio PCT`
 (GPU slots). Measured on an Arc 140V (16 GB) laptop, Qwen3-30B-A3B INT4 —
 a 15.2 GB model that doesn't fit resident at all:
 
-| `--offload-ratio` | Resident GPU memory | Decode |
+| `--offload-ratio` | Resident GPU memory | Steady-state decode |
 |---|---|---|
-| 30 | 10.8 GB | 4.9 tok/s |
-| 50 | 8.1 GB | 5.4 tok/s |
-| 90 | **2.35 GB** | 2.5 tok/s |
+| 30 | 10.8 GB | **25.3 tok/s** |
+| 50 | 8.1 GB | 22.1 tok/s |
+| 90 | **2.35 GB** | 5.1 tok/s |
 
-Pick the **smallest ratio that fits** your memory. Set expectations
-honestly: offload makes 30B-class quality *possible* on a laptop
-(batch/overnight work, careful Q&A) — it does not make it interactive.
-**Requires an XMX-capable GPU** (Arc, Lunar Lake and newer — `install.ps1`
-tells you at device detection); on iGPUs without XMX the feature silently
-does nothing, and NoLlama warns at startup instead of letting you believe
-your model got smaller.
+(Steady-state, measured after the expert LRU warms up — the first ~60
+tokens run 2-5× slower while the cache fills, so don't judge offload by
+its first sentence. `scripts/offload-test.py` measures this properly.)
+
+Pick the **smallest ratio that fits** your memory. At moderate ratios this
+is genuinely interactive: 25 tok/s from a 15.2 GB model on a 16 GB-class
+laptop iGPU matches a 24-core desktop CPU running the same model resident.
+High ratios (90) trade speed for extreme footprint — batch/overnight
+territory. **Requires an XMX-capable GPU** (Arc, Lunar Lake and newer —
+`install.ps1` tells you at device detection); on iGPUs without XMX the
+feature silently does nothing, and NoLlama warns at startup instead of
+letting you believe your model got smaller.
 
 ## What it does
 

@@ -148,10 +148,14 @@ OpenAI-compatible LLM/VLM server for Intel hardware. NPU-first.
 `--offload-ratio PCT` streams PCT% of MoE expert weights from disk on GPU
 slots (OpenVINO 2026.3 `OFFLOAD_RATIO`). **Requires XMX** (Arc/Lunar Lake;
 `GPU_HW_MATMUL` in OPTIMIZATION_CAPABILITIES) — silent no-op without, and
-NoLlama warns at startup. Verified on Arc 140V: Qwen3-30B-A3B int4 in
-2.35 GB resident at ratio 90 (2.5 tok/s — pick the smallest ratio that
-fits instead of maxing it). Non-XMX iGPUs can't load big MoE at all
-(USM staging OOM) — full story in TODONT.md.
+NoLlama warns at startup. Verified on Arc 140V, Qwen3-30B-A3B int4
+steady-state: ratio 30 → 10.8 GB resident @ 25.3 tok/s (interactive!);
+90 → 2.35 GB @ 5.1. Pick the smallest ratio that fits. The expert LRU
+needs ~60 tokens to warm — benchmark steady-state, not first-sentence.
+Known upstream bug: a SECOND generate() on an offload-active pipeline
+hangs in native code (uninterruptible); NoLlama serves sequential requests
+on one pipeline, so this needs watching in real use. Non-XMX iGPUs can't
+load big MoE at all (USM staging OOM) — full story in TODONT.md.
 
 ## NPU export rule (2026-08-06)
 
