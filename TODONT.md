@@ -3,6 +3,35 @@
 Things we tried that didn't work, or that work but aren't worth doing. Each
 entry explains *why not* so we don't re-litigate it in six months.
 
+## Gemma 4 on the NPU (2026-08-07)
+
+Idea: Gemma 4 launched this week; the E-series (E2B/E4B) are edge-sized
+multimodal models with Intel pre-exports — natural NPU candidates, and the
+blog post promised we'd test them.
+
+**Verdict:** no Gemma 4 on the NPU for now, on any precision. CPU (and
+presumably XMX GPU) is the way to run them.
+
+**Why not (285K NPU, driver 32.0.100.4778, genai 2026.3):**
+- `gemma-4-E4B-it-int8-ov` (Intel's own export) **compiles** for NPU
+  (103 s) but generates **garbage at 0.5 tok/s** — multilingual token
+  salad, three identical runs. The same file on CPU: 13.0 tok/s, perfectly
+  coherent. Export is sound; the NPU path is numerically broken for
+  `Gemma4ForConditionalGeneration`.
+- int4 variants are already documented (zenn.dev, 2026-08) to crash the
+  vpux compiler with the duplicated-names bug; we did not re-prove that.
+- Both failure modes differ from the LFM int8 traps (fast-garbage /
+  slow-correct) — this is slow-AND-garbage, a distinct NPU-path defect.
+
+The models themselves are good: `gemma-4-26b-a4b-it-int4-ov` (VLM MoE,
+128 experts) does **21.0 tok/s steady-state on the 285K CPU**, coherent,
+16 s load. E4B int8 does 13.0 on CPU. Gemma 4 belongs in the CPU/GPU
+columns, not the NPU column.
+
+Re-evaluate if: an NPU driver or openvino release notes gemma4 fixes —
+retest is `vlm_bench`-style, three minutes; or Intel ships a
+`-int4-cw-ov` build of a gemma-4 (none exist today, unlike gemma-3).
+
 ## OFFLOAD_RATIO (2026.3 MoE disk offload) on the desktop 285K iGPU (2026-08-06)
 
 Idea: OpenVINO 2026.3's MoE disk offload ("30B on 16 GB of memory") should
