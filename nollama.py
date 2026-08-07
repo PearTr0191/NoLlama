@@ -209,6 +209,11 @@ def parse_messages(messages, max_dim):
                 if url:
                     img = load_image(url, max_dim)
                     images.append(pil_to_tensor(img, max_dim))
+                    # Anchor the image to ITS turn in the flattened prompt —
+                    # without the tag, genai clusters all images before the
+                    # prompt and the model answers about image #1 regardless
+                    # of which turn asked the question.
+                    msg_text.append(f"<ov_genai_image_{len(images) - 1}>")
 
         joined = " ".join(msg_text)
         text_parts.append(joined)
