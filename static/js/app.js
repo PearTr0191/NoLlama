@@ -398,8 +398,12 @@ async function sendMessage() {
         displayHtml = escapeHtml(text);
     }
 
-    // Show user message
-    addMessage('user', displayHtml.replace(/\n/g, '<br>'));
+    // Show user message. Bypass renderMarkdown: displayHtml is already
+    // escaped where needed, and with an attached image it contains a real
+    // <img> tag — markdown rendering would escape it and dump the base64
+    // src as visible text.
+    const userDiv = addMessage('user', '');
+    userDiv.innerHTML = displayHtml.replace(/\n/g, '<br>');
     chatHistory.push({ role: 'user', content: userContent });
 
     // Clear input
