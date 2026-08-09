@@ -3,6 +3,39 @@
 Things we tried that didn't work, or that work but aren't worth doing. Each
 entry explains *why not* so we don't re-litigate it in six months.
 
+## Whole-book (100k+) prompts on CPU serving (2026-08-09)
+
+Idea: serve secondreader's whole-novel prompts (~113k tokens) from the 285K
+CPU slot — decode is fine there (25 tok/s short-context), 64 GB RAM holds
+weights + a 12 GB KV pool, and the prefix cache makes repeat artifacts cheap.
+
+**Verdict:** don't. CPU prefill is the wall, and the client-retry dynamics
+around it are actively destructive. Whole-book serving waits for XMX
+(140V/B60 — protocol in `docs/LAPTOP-140V-BOOKRUN.md`).
+
+**Why not (Qwen3-30B-A3B-Instruct-2507 int4, 285K CPU, genai 2026.1):**
+- Cold prefill measured ~45 tok/s at 10.6k tokens (TTFT 234s) and
+  superlinear beyond: 112,753 tokens produced NO first token in 90 minutes.
+  Decode with 10k context: ~6 tok/s (not the 25 of the short-context bench).
+- The client's timeout+retry then created a death spiral: identical requests
+  at exactly timeout-interval (5400s ×3 observed), each entering the CB
+  engine while the previous still ran — OpenVINO cannot cancel, a dead
+  socket does not stop a sequence. Three ~113k sequences in a ~131k-token
+  pool = permanent preemption, zero completions in 3h20m. Any client of an
+  uncancellable backend must set timeout > worst-case total and attempts=1.
+- Sizing rule that was missed: the KV pool must hold prompt + max_tokens
+  (113k + 32k = 145k > the 12 GB pool's 131k), so even a single request can
+  evict its own prefix during generation.
+
+Flow itself is fine — the same stack completed a 2-chapter book end-to-end
+(819s total, artifact + clean citation check). The failure is CPU prefill
+compute at book scale, not the pipeline.
+
+Re-evaluate if: OpenVINO's CPU plugin gains a dramatically faster prefill
+path (AMX-heavy), or a future NoLlama gains chunked-prefill progress
+reporting + duplicate-request rejection, which would at least defang the
+retry spiral.
+
 ## Gemma 4 on the NPU (2026-08-07)
 
 Idea: Gemma 4 launched this week; the E-series (E2B/E4B) are edge-sized

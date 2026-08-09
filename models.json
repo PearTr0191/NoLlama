@@ -230,7 +230,14 @@
             "hf_id": "OpenVINO/Qwen3-30B-A3B-Instruct-2507-int4-ov",
             "source": "pre-exported",
             "est_size_gb": 17,
-            "notes": "Best quality. Needs >32 GB RAM (shared with system)."
+            "notes": "Best quality. Needs >32 GB RAM (shared with system). Verified 2026-08-09 on 285K CPU via CB backend (smoke test). 262k context — holds a whole novel with --cache-size-gb 12."
+        },
+        {
+            "name": "Qwen3 Thinking 30B-A3B MoE (INT4)",
+            "hf_id": "aweussom/Qwen3-30B-A3B-Thinking-2507-int4-ov",
+            "source": "pre-exported",
+            "est_size_gb": 17,
+            "notes": "Always-thinking sibling of the Instruct 30B-A3B, same int4 recipe (our export — no Intel pre-export exists). Verified 2026-08-09 on 285K CPU: multi-step reasoning then a correct answer. Output ends thinking with </think> (no opening tag); give it max_tokens headroom or the reasoning eats the budget."
         },
         {
             "name": "Qwen3 Coder 30B-A3B MoE (INT4)",
