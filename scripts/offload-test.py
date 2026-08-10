@@ -3,6 +3,10 @@
 Usage:
     python scripts/offload-test.py <ratio> <model_dir> [device]
 
+`device` defaults to GPU and may be given in any position (CPU, GPU,
+GPU.1, NPU — case-insensitive), because dropping the trailing arg by
+accident silently produces a GPU run labelled as the CPU one you wanted.
+
 Run twice — ratio 0, then 90 — and compare `mem usm_device`:
   - drops sharply at 90  -> offload engaged (XMX GPU, fusable MoE IR)
   - identical            -> offload not engaged (most likely no XMX:
@@ -11,20 +15,33 @@ Run twice — ratio 0, then 90 — and compare `mem usm_device`:
 Requires openvino + openvino-genai >= 2026.3. The property only ever
 applies to MoE expert weights; dense models are unaffected.
 """
-import sys, time, traceback
+import re, sys, time, traceback
 
 import openvino as ov
 import openvino_genai as og
 
-if len(sys.argv) < 3:
+# Pull the device out of anywhere in the argument list. It used to be
+# positional-only, and a dropped trailing "CPU" then ran on GPU without
+# saying so — a whole round of benchmarking got filed under the wrong
+# device that way (#19).
+args = sys.argv[1:]
+devices = [a for a in args if re.fullmatch(r"(?i)(CPU|NPU|GPU(\.\d+)?)", a)]
+args = [a for a in args if a not in devices]
+if len(args) < 2 or len(devices) > 1:
     print(__doc__)
     sys.exit(2)
 
-RATIO = int(sys.argv[1])
-MODEL = sys.argv[2]
-DEVICE = sys.argv[3] if len(sys.argv) > 3 else "GPU"
+RATIO = int(args[0])
+MODEL = args[1]
+DEVICE = devices[0].upper() if devices else "GPU"
+DEFAULTED = " (default — append CPU to test the CPU)" if not devices else ""
 
-print(f"genai {og.__version__}, {DEVICE}, OFFLOAD_RATIO={RATIO}", flush=True)
+print(f"genai {og.__version__}, {DEVICE}{DEFAULTED}, OFFLOAD_RATIO={RATIO}", flush=True)
+if RATIO > 0 and not DEVICE.startswith("GPU"):
+    # OFFLOAD_RATIO is a GPU-plugin property; other plugins reject it.
+    print(f"  NOTE: OFFLOAD_RATIO is GPU-only — ignoring ratio {RATIO} on {DEVICE}.",
+          flush=True)
+    RATIO = 0
 t0 = time.time()
 try:
     if RATIO > 0:
