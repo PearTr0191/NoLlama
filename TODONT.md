@@ -162,6 +162,65 @@ the feature itself is real, first reproduction outside Intel we know of.
 NoLlama grew `--offload-ratio` the same evening, with a startup warning on
 non-XMX GPUs. install.ps1 surfaces XMX at device detection.
 
+**Update 2026-08-09 (whole-book prefill inverts the offload economics):**
+140V, Qwen3-30B-A3B-Instruct-2507 int4, 112.7k-token prompt, ratio 90,
+13 GB KV pool (15.78/16.5 GB used — pool + weights co-load fine): completed
+coherently but TTFT was **2h25m** and post-TTFT decode **0.38 tok/s** —
+total 4h26m for one artifact. Mechanism (from the laptop run's analysis):
+**prefill activates EVERY expert**, so at high ratios each prefill chunk
+re-uploads essentially the whole offloaded expert set — ~7 TB of logical
+reads over the run (served from the Windows file cache; the SSD idled while
+the GPU compute engine ran 95%). The RATIO, not the token count, is the
+multiplier: ratio-30 steady-state decode numbers (25.3 tok/s) say nothing
+about prefill-heavy workloads at ratio 90. Sizing rule: pick the ratio for
+the WORKLOAD — chat/agent (decode-heavy) tolerates high ratios; long-prompt
+work wants the lowest ratio that fits, because prefill pays the streaming
+tax per chunk. A 16 GB XMX AI-PC is thus an *overnight* whole-book appliance,
+not an interactive one; the B60's 24 GB fits the same job at ratio ≤50
+(possibly 0), which removes the multiplier — measure next week.
+
+**Update 2026-08-09 (field data, issue #19: ratio doesn't change decode speed
+when the model dwarfs the device):** Dmitriy Teteruk's Arc 140T (285H laptop,
+128 GB RAM), Qwen3-Coder-Next int8 (74 GB, 80B-A3B): ratio 30 AND 60 both
+decode at **3.7 tok/s** steady-state. His memory lines explain it: with any
+nonzero ratio, `usm_device` stays constant at 2.21 GB (attention/non-expert
+weights only) and the *retained* experts land in `usm_host` (50.5 GB at 30,
+28.8 GB at 60, 7.2 GB at his earlier 90) — and with 128 GB RAM the offloaded
+experts' file pages all live in the OS page cache anyway. So "retained" and
+"offloaded" experts are read over the same host-memory path either way; the
+ratio only changes how much host RAM is *pinned*, not the bandwidth
+bottleneck. Consequence: the "smallest ratio that fits" knee we measured on
+the 140V (where retained experts occupy device memory: 10.8/8.1/2.35 GB at
+30/50/90) applies when retained experts are device-resident. When the runtime
+puts them in host USM — observed when weights vastly exceed the device
+budget — a HIGHER ratio strictly dominates (same speed, less RAM pinned).
+Also his ratio 0 run (74.4 GB `usm_device`, via the 110 GB shared-memory
+override) does 21.3 tok/s — ~6× the offload path — so on huge-shared-memory
+machines, offload is a RAM-saving knob, not a speed-neutral one. Don't hand
+out the "smallest ratio" rule without asking where the retained experts land.
+
+**Update 2026-08-10 (the "21.3 tok/s" ratio-0 baseline above is an artefact —
+retract it, and with it the "6×" gap):** a re-run of the identical
+configuration on the same machine (Arc 140T, Qwen3-Coder-Next int8, ratio 0,
+74.42 GB `usm_device`, 140.1 s load) measured **9.1 tok/s** steady-state.
+This *is* the real-token-counting bug, contrary to what was first said here
+and in the issue thread: the 21.3 run was posted 2026-08-06 21:56, the fix
+(df0340e) landed 2026-08-07 08:06. Two tells in the pasted log itself —
+its memory lines lack the `(post-load)` suffix added by cb4215f the same
+morning, and it reads `OK: 64 tokens in 3.0s -> 21.3 tok/s` / `OUTPUT:
+Hello!`: the old code divided the *token budget* by wall-clock regardless
+of how many tokens were actually produced, so a generation that hit EOS
+after a couple of tokens reported ~3 s of mostly-prefill as 64 tokens of
+decode. **9.1 tok/s is the representative figure**, and the
+resident-vs-offload gap on that machine is ~2.5×, not 6×. Lesson for
+reading any pasted benchmark: date the log against the script's git
+history before theorising about power profiles — the log's own format is
+the version stamp. Second reading hazard, same thread: `offload-test.py`
+used to take the device positionally and default to `GPU`, so a request
+for a CPU baseline came back looking like a perfectly valid GPU run. It now
+accepts the device anywhere in the arguments and prints "(default …)" in
+the banner when it wasn't given — but always check the banner line.
+
 **Update 2026-08-07 (steady-state correction — the evening numbers above
 were 2-5× too pessimistic):** the offload LRU needs ~60 tokens to warm,
 and single-generate measurements reported cold-cache speed as the verdict.
