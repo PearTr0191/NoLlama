@@ -47,6 +47,98 @@ function scrollToBottom() {
     if (shouldAutoScroll()) chat.scrollTop = chat.scrollHeight;
 }
 
+// --- Sticky-bottom scroll for the live thinking block while streaming ---
+// The DOM is wholesale re-rendered on every token (innerHTML = renderMarkdown),
+// which normally destroys a scrollable .think-full and snaps its scroll to 0.
+// streamState survives the redraw: `pinned` means "the user is watching the
+// live tail", so each redraw re-pins to the bottom; a single scroll-up clears
+// the flag, after which redraws preserve the user's relative view ("freed").
+const STREAM_THRESHOLD = 32; // px from the bottom == "pinned to the stream"
+let streamState = { thinkFull: null, pinned: true, onScroll: null };
+
+function attachThinkScroll(thinkFull) {
+    // (Re)bind a scroll listener to the current think-full node. The node is
+    // recreated on every innerHTML redraw during streaming i.e. detach from the
+    // old one and bind to the new one. `pinned` lives on streamState and is
+    // read at redraw time, not captured by the listener closure's creation, so
+    // it persists correctly across redraws.
+    if (streamState.onScroll && streamState.thinkFull) {
+        streamState.thinkFull.removeEventListener('scroll', streamState.onScroll);
+    }
+    streamState.thinkFull = thinkFull;
+    streamState.onScroll = function () {
+        const tf = streamState.thinkFull;
+        if (!tf) return;
+        streamState.pinned = tf.scrollHeight - tf.scrollTop - tf.clientHeight <= STREAM_THRESHOLD;
+    };
+    thinkFull.addEventListener('scroll', streamState.onScroll, { passive: true });
+}
+
+function updateStreamBubble(assistantDiv, fullText) {
+    // A scrollable .think-full already exists so only its inner content is swapped, allowing
+    // to preserve the user's scrollTop natively — no element recreation,
+    // manual restore, thus no fighting the user's wheel. Pinned re-pins to the
+    // tail; freed leaves the position untouched.
+    const prev = streamState.thinkFull;
+    if (prev) {
+        const scratch = document.createElement('div');
+        scratch.innerHTML = renderMarkdown(fullText, true);
+        const newFull = scratch.querySelector('.think-full');
+        if (newFull) {
+            prev.innerHTML = newFull.innerHTML; // same element; scroll preserved
+            const block = prev.closest('.think-block');
+            const newBlock = scratch.querySelector('.think-block');
+            if (block && newBlock) {
+                const preview = block.querySelector('.think-preview');
+                const newPreview = newBlock.querySelector('.think-preview');
+                if (preview && newPreview) preview.innerHTML = newPreview.innerHTML;
+                const header = block.querySelector('.think-header');
+                const newHeader = newBlock.querySelector('.think-header');
+                if (header && newHeader) header.innerHTML = newHeader.innerHTML;
+                block.classList.toggle('collapsed', newBlock.classList.contains('collapsed'));
+                block.classList.toggle('streaming', newBlock.classList.contains('streaming'));
+                // Just-answer button lives after the think block; sync it below.
+            }
+            syncAnswerNodes(assistantDiv, scratch);
+            if (streamState.pinned) prev.scrollTop = prev.scrollHeight;
+        } else {
+            // Think block closed — rebuild the whole bubble.
+            assistantDiv.innerHTML = renderMarkdown(fullText, true);
+            const tf = assistantDiv.querySelector('.think-full');
+            if (tf) attachThinkScroll(tf);
+        }
+    } else {
+        // No scrollable think block yet — normal full re-render, then attach
+        // the scroll listener the first time a .think-full appears.
+        assistantDiv.innerHTML = renderMarkdown(fullText, true);
+        const thinkFull = assistantDiv.querySelector('.think-full');
+        if (thinkFull) {
+            attachThinkScroll(thinkFull);
+            if (streamState.pinned) thinkFull.scrollTop = thinkFull.scrollHeight;
+        }
+    }
+    scrollToBottom(); // keep the outer chat at the bottom when viewing the tail
+}
+
+// Keep the surviving .think-block, drop everything else in assistantDiv, then
+// re-append the answer nodes (and just-answer button) from the scratch render.
+function syncAnswerNodes(assistantDiv, scratch) {
+    const keepBlock = assistantDiv.querySelector('.think-block');
+    Array.from(assistantDiv.children).forEach((c) => { if (c !== keepBlock) c.remove(); });
+    Array.from(scratch.children).forEach((c) => {
+        if (!c.classList || !c.classList.contains('think-block')) assistantDiv.appendChild(c);
+    });
+}
+
+function resetStreamState() {
+    if (streamState.onScroll && streamState.thinkFull) {
+        streamState.thinkFull.removeEventListener('scroll', streamState.onScroll);
+    }
+    streamState.thinkFull = null;
+    streamState.pinned = true;
+    streamState.onScroll = null;
+}
+
 // --- Init ---
 
 async function init() {
@@ -189,6 +281,7 @@ async function justAnswerMe(event) {
         const contentType = resp.headers.get('content-type') || '';
         if (contentType.includes('text/event-stream')) {
             let fullText = '';
+            resetStreamState();
             const reader = resp.body.getReader();
             const decoder = new TextDecoder();
             let buffer = '';
@@ -208,14 +301,14 @@ async function justAnswerMe(event) {
                         const delta = chunk.choices?.[0]?.delta?.content;
                         if (delta) {
                             fullText += delta;
-                            assistantDiv.innerHTML = renderMarkdown(fullText, true);
-                            scrollToBottom();
+                            updateStreamBubble(assistantDiv, fullText);
                         }
                     } catch {}
                 }
             }
 
             assistantDiv.innerHTML = renderMarkdown(fullText, false);
+            resetStreamState();
             const elapsed = ((performance.now() - t0) / 1000).toFixed(1);
             const metaDiv = document.createElement('div');
             metaDiv.className = 'meta';
@@ -289,16 +382,9 @@ function renderMarkdown(text, isStreaming) {
     if (thinkMatch) {
         const thinkContent = thinkMatch[1].trim();
         mainText = thinkMatch[2].trim();
-        // Skip empty think blocks (no-think mode sometimes emits <think></think>)
+        // Skip empty think blocks (no-think mode sometimes emits empty tags)
         if (thinkContent) {
-            const lines = thinkContent.split('\n');
-            const preview = lines.slice(-3).join('\n');
-            const cls = thinkExpanded ? '' : 'collapsed';
-            thinkHtml = `<div class="think-block ${cls}" data-think-toggle>
-                <div class="think-header">Thinking... <span class="think-toggle">(click to expand)</span></div>
-                <div class="think-full">${escapeHtml(thinkContent).replace(/\n/g, '<br>')}</div>
-                <div class="think-preview">${escapeHtml(preview).replace(/\n/g, '<br>')}</div>
-            </div>`;
+            thinkHtml = renderThinkingBlock(thinkContent, false, thinkExpanded ? '' : 'collapsed');
         }
     } else if (thinkOpen) {
         // Still thinking — show content live
@@ -307,22 +393,16 @@ function renderMarkdown(text, isStreaming) {
             const lines = thinkContent.split('\n');
             if (lines.length > 4) {
                 // Enough lines — expandable + just-answer button
-                const preview = lines.slice(-4).join('\n');
                 const justAnswerBtn = lines.length > 8
                     ? `<button class="just-answer" data-just-answer>Just answer me, dammit!</button>`
                     : '';
                 const cls = thinkExpanded ? '' : 'collapsed';
-                thinkHtml = `<div class="think-block streaming ${cls}" data-think-toggle>
-                    <div class="think-header">Thinking... <span class="think-toggle">(click to expand)</span></div>
-                    <div class="think-full">${escapeHtml(thinkContent).replace(/\n/g, '<br>')}</div>
-                    <div class="think-preview">${escapeHtml(preview).replace(/\n/g, '<br>')}</div>
-                    ${justAnswerBtn}
-                </div>`;
+                thinkHtml = renderThinkingBlock(thinkContent, true, cls) + justAnswerBtn;
             } else {
                 // Few lines — show all, no collapse needed
                 thinkHtml = `<div class="think-block streaming">
                     <div class="think-header">Thinking...</div>
-                    <div class="think-preview">${escapeHtml(thinkContent).replace(/\n/g, '<br>')}</div>
+                    <div class="think-preview">${mdEscapeAndRender(thinkContent)}</div>
                 </div>`;
             }
         } else {
@@ -339,27 +419,98 @@ function renderMarkdown(text, isStreaming) {
         mainText = '';
     }
 
-    // Render the main text as markdown (escape HTML first)
-    let html = escapeHtml(mainText);
+    // Render the main text as markdown
+    return thinkHtml + mdEscapeAndRender(mainText);
+}
 
-    // Code blocks: ```...```
-    html = html.replace(/```(\w*)\n([\s\S]*?)```/g, (_, lang, code) => {
-        return `<pre><code>${code.trim()}</code><button class="copy-btn" onclick="copyCode(this)">copy</button></pre>`;
+// Renders the inner HTML for a thinking block's full/preview content.
+// Uses the same markdown renderer as the main answer so markdown syntax
+// inside thinking (headers, lists, bold, code blocks) is rendered, not
+// leaked as raw text.
+function renderThinkingBlock(content, streaming, extraClass) {
+    const full = mdEscapeAndRender(content);
+    const preview = mdEscapeAndRender(content.split('\n').slice(-3).join('\n'));
+    const cls = streaming ? 'streaming ' + extraClass : extraClass;
+    return `<div class="think-block ${cls}" data-think-toggle>
+        <div class="think-header">Thinking... <span class="think-toggle">(click to expand)</span></div>
+        <div class="think-full">${full}</div>
+        <div class="think-preview">${preview}</div>
+    </div>`;
+}
+
+// ---------------------------------------------------------------------------
+// Markdown rendering (self-contained, no dependencies)
+// ---------------------------------------------------------------------------
+// Order-of-operations:
+//   1. escapeHtml the whole input to guarantee raw model HTML can never execute.
+//      All passes below operate on the escaped text.
+//   2. Pull fenced code blocks into protected placeholders so the inline
+//      bold/italic/code passes below never touch code content (the old
+//      renderer mangled `**x**` and `*x*` inside code blocks).
+//   3. Inline passes: inline code, images, links, bold, italic.
+//   4. Block passes, line by line: headers, blockquotes, lists, paragraphs.
+function mdEscapeAndRender(text) {
+    if (!text) return '';
+    let html = escapeHtml(text);
+    const codeBlocks = [];
+    html = html.replace(/```([a-zA-Z0-9_-]*)\n([\s\S]*?)```/g, (_, lang, code) => {
+        const i = codeBlocks.length;
+        codeBlocks.push({ lang, code: code.replace(/\n$/, '') });
+        return `\u0000CODE${i}\u0000`;
     });
+    html = mdInline(html);
+    const lines = html.split('\n');
+    const out = [];
+    let inList = false, inBlockquote = false, inParagraph = false;
+    const closePara = () => { if (inParagraph) { out.push('</p>'); inParagraph = false; } };
+    const closeList = () => { if (inList) { out.push(`</${inList}>`); inList = false; } };
+    const closeBlockquote = () => { if (inBlockquote) { out.push('</blockquote>'); inBlockquote = false; } };
+    for (let i = 0; i < lines.length; i++) {
+        const trimmed = lines[i].trim();
+        const codeMatch = trimmed.match(/^(\u0000CODE\d+\u0000)$/);
+        if (codeMatch) {
+            closePara(); closeList(); closeBlockquote();
+            const blk = codeBlocks[+codeMatch[1].match(/\d+/)];
+            out.push(`<pre><code class="language-${escapeHtml(blk.lang || '')}">${blk.code}</code><button class="copy-btn" onclick="copyCode(this)">copy</button></pre>`);
+            continue;
+        }
+        const h = trimmed.match(/^(#{1,6})\s+(.*)$/);
+        if (h) { closePara(); closeList(); closeBlockquote(); out.push(`<h${h[1].length}>${mdInline(h[2])}</h${h[1].length}>`); continue; }
+        const bq = trimmed.match(/^> ?(.*)$/);
+        if (bq) { closePara(); closeList(); if (!inBlockquote) { closeBlockquote(); out.push('<blockquote>'); inBlockquote = true; } out.push(mdInline(bq[1])); continue; }
+        closeBlockquote();
+        const ol = trimmed.match(/^(\d+)\. (.*)$/);
+        const ul = trimmed.match(/^[-*+] (.*)$/);
+        if (ol || ul) {
+            closePara();
+            const listType = ol ? 'ol' : 'ul';
+            if (inList !== listType) { closeList(); out.push(`<${listType}>`); inList = listType; }
+            out.push(`<li>${mdInline((ol ? ol[2] : ul[1]) || '')}</li>`);
+            continue;
+        }
+        closeList();
+        if (trimmed === '') { closePara(); closeBlockquote(); continue; }
+        if (!inParagraph) { out.push('<p>'); inParagraph = true; } else { out.push(' '); }
+        out.push(mdInline(lines[i]));
+    }
+    closePara(); closeList(); closeBlockquote();
+    return out.join('').replace(/\u0000CODE\d+\u0000/g, m => {
+        const blk = codeBlocks[+(m.match(/\d+/) || [0])[0]];
+        return `<pre><code class="language-${escapeHtml(blk.lang || '')}">${blk.code}</code><button class="copy-btn" onclick="copyCode(this)">copy</button></pre>`;
+    });
+}
 
-    // Inline code
-    html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
-
-    // Bold
-    html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
-
-    // Italic
-    html = html.replace(/\*(.+?)\*/g, '<em>$1</em>');
-
-    // Line breaks
-    html = html.replace(/\n/g, '<br>');
-
-    return thinkHtml + html;
+// Apply inline passes (on already-escaped text) to a single block of text.
+function mdInline(str) {
+    let s = str;
+    s = s.replace(/`([^`]+)`/g, (_, c) => `<code>${c}</code>`);
+    s = s.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (_, a, u) => `<img alt="${a}" src="${u}">`);
+    s = s.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_, l, u) => `<a href="${u}">${l}</a>`);
+    s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+    s = s.replace(/__([^_]+)__/g, '<strong>$1</strong>');
+    s = s.replace(/\*([^*]+)\*/g, '<em>$1</em>');
+    s = s.replace(/_([^_]+)_/g, '<em>$1</em>');
+    return s;
 }
 
 function escapeHtml(text) {
@@ -376,6 +527,11 @@ function copyCode(btn) {
 }
 // Make copyCode available globally
 window.copyCode = copyCode;
+// Exposed for browser-test harnesses (no functional side effects)
+window.mdEscapeAndRender = mdEscapeAndRender;
+window.renderMarkdown = renderMarkdown;
+window.updateStreamBubble = updateStreamBubble;
+window.resetStreamState = resetStreamState;
 
 async function sendMessage() {
     const text = input.value.trim();
@@ -457,6 +613,7 @@ async function sendMessage() {
         if (contentType.includes('text/event-stream')) {
             // Streaming
             let fullText = '';
+            resetStreamState();
             const reader = resp.body.getReader();
             const decoder = new TextDecoder();
             let buffer = '';
@@ -478,8 +635,7 @@ async function sendMessage() {
                         const delta = chunk.choices?.[0]?.delta?.content;
                         if (delta) {
                             fullText += delta;
-                            assistantDiv.innerHTML = renderMarkdown(fullText, true);
-                            scrollToBottom();
+                            updateStreamBubble(assistantDiv, fullText);
                         }
                     } catch {}
                 }
@@ -487,6 +643,7 @@ async function sendMessage() {
 
             // Re-render with streaming=false to collapse think block
             assistantDiv.innerHTML = renderMarkdown(fullText, false);
+            resetStreamState();
 
             const elapsed = ((performance.now() - t0) / 1000).toFixed(1);
             const metaHtml = device
