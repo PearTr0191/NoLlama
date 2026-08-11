@@ -2642,10 +2642,31 @@ def ollama_v1_chat_completions():
 # ---------------------------------------------------------------------------
 
 def check_port(port):
+    """True if nothing is serving on the port.
+
+    Connect-test, NOT bind-test. A bind probe lies on Windows: a specific-
+    address binding (Ollama's default is 127.0.0.1:11434) and a 0.0.0.0
+    wildcard bind are treated as distinct, so bind("0.0.0.0", 11434)
+    SUCCEEDS while real Ollama is running — and so does Flask's own bind
+    right after. The result is two servers on one port: localhost clients
+    reach Ollama (most-specific binding wins), LAN clients reach NoLlama,
+    and which one answers depends on the caller's route. Asking "does
+    anything accept a connection here?" is the question we actually mean.
+    """
     try:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.bind(("0.0.0.0", port))
+        with socket.create_connection(("127.0.0.1", port), timeout=0.25):
+            return False  # somebody answered
+    except OSError:
         return True
+
+
+def _identify_ollama(port):
+    """Best-effort: is the process on <port> actually Ollama? Its root
+    endpoint answers the plain-text 'Ollama is running'."""
+    try:
+        import urllib.request
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/", timeout=1) as r:
+            return b"ollama" in r.read(200).lower()
     except OSError:
         return False
 
@@ -2882,8 +2903,11 @@ def main():
         print(f"Use --port <number> to pick another port.")
         sys.exit(1)
     if args.ollama_port and not check_port(args.ollama_port):
-        print(f"WARNING: Ollama port {args.ollama_port} is in use. "
-              f"Ollama API disabled. (Is Ollama already running?)")
+        who = ("real Ollama is running there"
+               if _identify_ollama(args.ollama_port)
+               else "another process is using it")
+        print(f"WARNING: Ollama port {args.ollama_port} is taken — {who}. "
+              f"NoLlama's Ollama emulation disabled.")
         args.ollama_port = 0
 
     # 2. Detect devices
