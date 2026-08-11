@@ -46,6 +46,7 @@ import openvino as ov
 import openvino_genai as ovg
 from flask import Flask, Response, jsonify, request, render_template
 from PIL import Image
+from werkzeug.serving import ThreadedWSGIServer
 try:
     import soundfile as sf
 except ImportError:
@@ -2641,6 +2642,28 @@ def ollama_v1_chat_completions():
 # Startup
 # ---------------------------------------------------------------------------
 
+class _ExclusiveThreadedWSGIServer(ThreadedWSGIServer):
+    """Prevent another Windows process from sharing any address on the port."""
+
+    def server_bind(self):
+        if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            # Werkzeug enables SO_REUSEADDR by default. On Windows that permits
+            # a later, more-specific bind to split traffic on the same port.
+            self.allow_reuse_address = False
+            self.socket.setsockopt(
+                socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1
+            )
+        super().server_bind()
+
+
+def _serve_app(flask_app, port):
+    server = _ExclusiveThreadedWSGIServer("0.0.0.0", port, flask_app)
+    try:
+        server.serve_forever()
+    finally:
+        server.server_close()
+
+
 def check_port(port):
     """True if nothing is serving on the port.
 
@@ -2651,13 +2674,28 @@ def check_port(port):
     right after. The result is two servers on one port: localhost clients
     reach Ollama (most-specific binding wins), LAN clients reach NoLlama,
     and which one answers depends on the caller's route. Asking "does
-    anything accept a connection here?" is the question we actually mean.
+    anything accept a connection on any local address?" is the question we
+    actually mean.
     """
+    addresses = {"127.0.0.1"}
     try:
-        with socket.create_connection(("127.0.0.1", port), timeout=0.25):
-            return False  # somebody answered
-    except OSError:
-        return True
+        addresses.update(
+            info[4][0]
+            for info in socket.getaddrinfo(
+                socket.gethostname(), port, socket.AF_INET, socket.SOCK_STREAM
+            )
+            if info[4][0] != "0.0.0.0"
+        )
+    except socket.gaierror:
+        pass  # loopback still catches wildcard and loopback-only listeners
+
+    for address in addresses:
+        try:
+            with socket.create_connection((address, port), timeout=0.25):
+                return False  # somebody answered
+        except OSError:
+            continue
+    return True
 
 
 def _identify_ollama(port):
@@ -3044,9 +3082,11 @@ def main():
         print(f"  Ollama API on port {args.ollama_port}", flush=True)
         def _run_ollama():
             try:
-                ollama_app.run(
-                    host="0.0.0.0", port=args.ollama_port, threaded=True,
-                )
+                _serve_app(ollama_app, args.ollama_port)
+            except SystemExit:
+                print(f"  WARNING: Ollama API failed to claim port "
+                      f"{args.ollama_port}. NoLlama's Ollama emulation disabled.",
+                      flush=True)
             except Exception as e:
                 print(f"  WARNING: Ollama API failed to start: {e}", flush=True)
         ollama_thread = threading.Thread(target=_run_ollama, daemon=True)
@@ -3054,7 +3094,7 @@ def main():
 
     # OpenAI API on main thread
     print(f"  OpenAI API on port {args.port}", flush=True)
-    app.run(host="0.0.0.0", port=args.port, threaded=True)
+    _serve_app(app, args.port)
 
 
 if __name__ == "__main__":
