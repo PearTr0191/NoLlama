@@ -65,13 +65,16 @@ because LLM decode streams the whole model per token.
 |---|---|---|---|---|---|
 | SmolLM3-3B (~2 GB) | 23.3 ᵃ | 29.7 ᵃ | *wanted* | 37.5 ᵃ | 23.0 ᵇ |
 | Qwen3-8B (~5 GB) | 10.0 ᵃ | 21.7 ᶜ / 15.4 ᵃ | *wanted* | 17.8 ᵃ | *wanted* |
-| Qwen3-30B-A3B MoE (~17 GB, ~2 GB active) | n/a — over the NPU's size class | 25.3 ᶜ (`--offload-ratio 30`) | *wanted* (B60 numbers coming) | ~6 † | — needs >32 GB RAM |
+| Qwen3-30B-A3B MoE (~17 GB, ~2 GB active) | n/a — over the NPU's size class | 25.3 ᶜ (`--offload-ratio 30`) | *wanted* (B60 numbers coming) | ~6 † | ‡ |
 
 ᵃ Core Ultra 9 **285K** desktop — DDR5-6400 (~100 GB/s), 4-core Xe-LPG iGPU, NPU 3.
 ᵇ AMD Ryzen 9 **5950X** — DDR4 (~50 GB/s). Unsupported-but-measured; see below.
 ᶜ Core Ultra 7 **258V** laptop — Arc 140V iGPU on LPDDR5X-8533 (~136 GB/s).
 † 285K CPU at *whole-novel context* (~6 tok/s) — KV reads eat bandwidth at that
 scale; no clean short-context CPU number for the MoE yet.
+‡ Pronounced, not measured: DDR5 already sits at ~6 tok/s (†), and DDR4 has
+roughly half the bandwidth — big-MoE-on-DDR4-CPU is below usable at real
+context. Not worth the 17 GB download to confirm.
 
 Reading it: the memory column, not the device column, predicts most of the
 table (the laptop iGPU beats the desktop's because its *memory* is faster).
