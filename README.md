@@ -423,11 +423,18 @@ your Core Ultra feel like Ollama already ran on it.
 Same answer, different Intel stack. [`intel/llm-scaler`](https://github.com/intel/llm-scaler)
 (vLLM + IPEX, the Battlematrix software) is Intel's official serving
 path for **Arc Pro B-series** cards — and if you're building a
-dedicated Linux inference box around B60s, use it: batch throughput
-and multi-GPU scaling are its whole point. It's also Ubuntu-with-a-
-specific-kernel, Docker, and Linux-only for the vLLM path. NoLlama is
-for the machines you actually sit at — Windows or Linux, NPU + iGPU +
-CPU included, no containers. Different jobs, both real.
+dedicated Linux inference box around them, use it: multi-card
+tensor-parallel serving is its home game. It's also Ubuntu-with-a-
+specific-kernel, Docker, and Linux-only for the vLLM path.
+
+The axis that actually decides is streams × precision. LLM decode is
+memory-bandwidth-bound, and 4-bit weights move roughly a quarter of
+the bytes per token — INT4 IR is openvino-genai's native format, so
+**single-user quantized decode on Intel silicon is NoLlama's tier**:
+one to a few streams, the machine you sit at. Moderate shared
+concurrency is OVMS's tier (continuous batching, same INT4 IR).
+Multi-GPU tensor-parallel on Linux is llm-scaler's. Different jobs,
+all three real.
 
 ## Usage
 
