@@ -3,6 +3,166 @@
 Things we tried that didn't work, or that work but aren't worth doing. Each
 entry explains *why not* so we don't re-litigate it in six months.
 
+## Port-availability check via bind() probe (2026-05 -> 2026-08-11)
+
+What we had: check_port() tried bind(("0.0.0.0", port)) and treated success
+as "free". Shipped that way from the start.
+
+**Verdict:** replaced with a connect-test (does anything ACCEPT on loopback
+or any hostname-resolved local IPv4 address?). Never use a bind probe for
+"is somebody serving here" on Windows.
+
+**Why not:** Windows treats a specific-address binding and a wildcard bind
+as distinct — bind("0.0.0.0", 11434) SUCCEEDS while real Ollama holds
+127.0.0.1:11434, and Flask then double-binds the same way. Two servers on
+one port: localhost clients reach Ollama (most-specific binding wins), LAN
+clients reach NoLlama. Found live on the fresh-Ryzen test box (2026-08-11);
+reproduced in isolation the same day — a loopback-only listener + a
+successful wildcard bind on the same port, same machine. On Linux the same
+bind fails EADDRINUSE, which is why it looked correct for months.
+_identify_ollama() now also names the incumbent in the warning.
+
+This does not replace exclusivity on the real server socket: NoLlama's
+Werkzeug listeners use `SO_EXCLUSIVEADDRUSE` on Windows so a process started
+later cannot claim a more-specific address on the same port. The connect-test
+exists only to identify an incumbent cleanly before startup.
+
+---
+
+## Meta Muse Glimmer 30B for NoLlama (2026-08-10)
+
+Idea: Meta released Muse Glimmer on HF the day it landed here — Apache 2.0,
+agentic-first (tool calling, multi-step reasoning), multimodal (interleaved
+text+image), explicitly pitched as "runs locally on consumer hardware". On
+paper that is exactly NoLlama's story: GPU/CPU tool calling + VLM routing.
+
+**Verdict:** don't. Not a measurement — arithmetic, from the model card. The
+disqualifier is one architectural fact: it is **dense**, and dense removes
+the only lever that makes a 30B-class model usable on this hardware.
+
+**Shape:** ~29.6B total = **dense** 28B text decoder + ~1.8B ViT perception
+encoder. 52 layers, hidden 6656, GQA 32 q / 2 kv (head_dim 208), interleaved
+local(2048 window)/global attention, RoPE θ=500k, 128k context, vocab 202k.
+Meta's own floor is a **24 GB VRAM envelope** at 4-bit.
+
+**Why not:**
+- **Dense ⇒ `--offload-ratio` is inapplicable.** OFFLOAD_RATIO streams *MoE
+  expert weights*; there are no experts. The thing that made Qwen3-30B-A3B
+  interactive on the 140V (ratio 30 → 10.8 GB resident @ 25.3 tok/s) simply
+  does not exist here. Everything must be resident, with no knob to claw back.
+- **Doesn't fit the 140V.** int4 decoder ≈ 15 GB + vision tower (OV VLM
+  exports keep the encoder at higher precision, ~3.5 GB) + KV (~86 KB/token
+  at full attention; less if OV ever implements the 3-in-4 sliding window,
+  which a brand-new arch won't get on day one) against ~16.5 GB usable.
+  Over budget before the first token.
+- **Dense 28B is ~6× the compute of a peer we already call slow.**
+  `gemma-4-26b-a4b-it-int4` (4B active) does 21.0 tok/s steady-state on the
+  285K CPU. Same total size, dense, touches all 28B per token → expect ~3.
+  The desktop iGPU fits it by memory (33 GB shared) but has no XMX and is
+  bandwidth-bound; prefill on a real agent prompt would be worse than the
+  ~6 min TTFT already logged there.
+- **NPU: out entirely.** 30B dense, and the NPU path caps at MAX_PROMPT_LEN
+  4096 regardless.
+- **No exporter.** New `AutoModelForMultimodalLM` architecture; optimum-intel
+  2.1.0 in `venv-2026.3` predates it. Blocked upstream even if the numbers
+  were good — and per #19 that conversion would be RAM-bound anyway.
+
+**Where it does belong today:** the RTX 5090 (32 GB), outside NoLlama's
+Intel/OpenVINO remit. Ollama shipped an `-mlx` build at launch and says the
+CUDA build follows "in the following days" — that is the path for this model
+on this desk, and it costs us nothing.
+
+**But the verdict inverts on an Arc Pro B70 (32 GB) — the exporter is then
+the only blocker.** Xe2-HPG, 256 XMX engines, **32 GB dedicated GDDR6 at
+608 GB/s**. int4 decoder ~15 GB + vision tower ~3.5 GB ≈ 18-19 GB resident,
+~13 GB left for KV. Bandwidth ceiling 608/15 ≈ 40 tok/s; at the 40-60% of
+peak these reach in practice, **~15-25 tok/s — interactive**. On that card
+the missing offload lever is irrelevant: nothing needs to stream.
+
+**On the B60 (24 GB, 456 GB/s, arriving 2026-08-10 week) it fits — but only
+for agent/chat, not whole-book.** Weight budget swings on how the vision
+tower is exported: decoder int4 ≈ 14.5 GB (≈16 if embeddings/lm_head stay
+int8 — vocab is 202k × 6656, so those two tensors are ~2.7B params on their
+own), vision 1.8B at int8 ≈ 1.8 GB / at fp16 ≈ 3.6 GB. So **16.3 GB best
+case, 19.6 GB worst**, leaving 4-7 GB of KV. At ~84.5 KB/token (52 layers ×
+2 kv heads × 208 head_dim × 2 × fp16) that is **~40-75k tokens** — plenty for
+a 21k agent prompt, and the reason to export the vision tower at int8.
+Meta's own figure is 55 GB bf16 → **18-20 GB at 4-bit**, i.e. the worst case
+above — so budget ~4 GB of KV, ~45k tokens. That is no longer a constraint
+worth worrying about: secondreader retired whole-book prompting entirely on
+2026-08-09 (depth collapse is architectural — every ≤35B model goes thin and
+loses anchors at 120k, while the same models scoped per-chapter produce 20×
+the richness), so the workload this card serves is **scoped chapter calls of
+5-15k tokens**, not 113k. 45k tokens is ample.
+
+**And even with a perfect exporter it is the wrong model class for the
+surviving workload.** Scoped means *many serial calls* (one per chapter), so
+throughput is the figure of merit — and the two local models that actually
+deliver there are **MoE**: gemma4-26b-**a4b** (11,553 words, 901 anchors, 0
+bad) and qwen3.6-35b-**a3b** (the only ≤35B arm to hold [ChN:M] perfectly at
+122k). Both buy 26-35B quality at 3-4B active cost. A dense 28B pays full
+28B compute on every token of every chapter call. Glimmer would be a *peer*
+of gemma4-26b-a4b in capability and several times its cost per artifact.
+
+**The exporter is the whole blocker for now, and it is proven, not suspected
+(checked 2026-08-10, release day):**
+- `config.json` declares `model_type: "muse_glimmer"`,
+  `MuseGlimmerForConditionalGeneration`, nested `muse_glimmer_text` /
+  `muse_glimmer_vision`. **No `muse_glimmer` registration exists in
+  optimum-intel `main`** (`optimum/exporters/openvino/model_configs.py`;
+  newest multimodal entries are gemma4_unified, gemma3n, qwen3_omnimoe).
+  `optimum-cli export openvino` fails at config lookup — no flag routes around
+  a missing exporter config.
+- It requires **transformers 5.15.0.dev0**; `venv-2026.3` is pinned to **5.4**
+  by the LFM2 exporter's cap. That is a third venv, not an upgrade.
+- No `OpenVINO/Muse-Glimmer-*-int4-ov` pre-convert exists yet. Intel shipped
+  the Qwen3-VL pre-export within weeks, so **waiting most likely obtains the
+  export for free** and skips a RAM-bound 55 GB conversion. Do not spend the
+  download until either the pre-convert appears or `muse_glimmer` lands in
+  optimum-intel.
+
+**Capacity is the wrong axis for a dense model — don't reach for the
+big-RAM machine.** Dmitriy's Arc 140T (285H, 128 GB RAM, 110 GB shared-memory
+override) has 2× this desk's RAM and still loses: his ratio-0 Qwen3-Coder-Next
+int8 does 9.1 tok/s on an 80B-**A3B** (~3B active), implying ~45 GB/s
+effective for weight reads. Dense 28B int4 reads ~15 GB *per token* on that
+path → **~2-3 tok/s**. The rule: **MoE is capacity-bound** (huge shared
+memory is the fix — it's why he can run a 74 GB model at all); **dense is
+bandwidth-bound** (only dedicated VRAM is the fix). Adding host RAM to an
+iGPU does nothing for Glimmer.
+
+**Decision 2026-08-11: let Intel do the heavy lifting.** The DIY path is a
+third venv on transformers >=5.15 (5.4 has no `muse_glimmer` module at all —
+and Meta shipped no `modeling_*.py`, so `trust_remote_code` is not a door
+either), plus a hand-written `MuseGlimmerOpenVINOConfig`, plus probable
+`VLMPipeline` per-architecture work on the C++ side. Not worth it for a model
+that would at best tie `gemma4-26b-a4b`. Weights not downloaded — nothing is
+staged locally, and there is no reason to stage it until an export exists.
+
+**The gate is a quality measurement, not the hardware and not the export.**
+Ollama's CUDA build lands within days; run Glimmer through `facts-scoped` on
+the 5090 against oldgods with the terra ruler — a *model* question, fully
+separable from OpenVINO plumbing, answerable in an afternoon with the harness
+that already exists. The row to beat is `gemma4:26b` scoped: **11,553 words,
+901 anchors (0 bad), 54 quotes / 2 flagged, both nine-minute facts + late
+fifties**. If Glimmer does not clear that, the OpenVINO question never needs
+asking. Only if it clears it decisively does the export matter — and by then
+Intel has probably shipped `OpenVINO/Muse-Glimmer-*-int4-ov` anyway.
+
+Re-evaluate if: (a) Glimmer beats gemma4-26b-a4b scoped on the 5090 **and** an
+OpenVINO export exists; (b) a smaller or **MoE** Glimmer variant ships, which
+would restore the offload lever, suit the many-serial-calls shape, and make
+even 16 GB XMX viable. Do **not** re-evaluate on the grounds that some machine
+has more system RAM, more pagefile, or faster internet — none of the three
+walls (transformers implementation, optimum-intel exporter, genai VLM arch) is
+resource-bound.
+
+**Update 2026-08-11:** On hold *until Intel ships a pre-exported OpenVINO
+variant* -- no self-export attempts before that, even though the incoming
+B60 (24 GB) matches Meta's stated 4-bit envelope. The gate is support, not
+hardware. The model-watch bot tracks the OpenVINO org, so the gate opening
+files its own issue; nothing to poll.
+
 ## Whole-book (100k+) prompts on CPU serving (2026-08-09)
 
 Idea: serve secondreader's whole-novel prompts (~113k tokens) from the 285K
@@ -35,6 +195,33 @@ Re-evaluate if: OpenVINO's CPU plugin gains a dramatically faster prefill
 path (AMX-heavy), or a future NoLlama gains chunked-prefill progress
 reporting + duplicate-request rejection, which would at least defang the
 retry spiral.
+
+**Update 2026-08-10 — don't re-evaluate: the workload is gone.** The entry
+above says whole-book serving "waits for XMX (140V/B60)". It no longer waits;
+secondreader retired whole-book prompting outright on branch `scoped-facts`,
+on **quality** grounds that no hardware fixes. The runtime confound was closed
+in both directions: the identical 113k-token payload ran on the 5090 at full
+speed (prefill 2,100 tok/s, whole artifact in 4 min) and still collapsed —
+2,707 words, 74 anchors all in the wrong format, zero precision probes — while
+the 140V/OpenVINO run of the same model landed statistically identical (2,753
+words, zero anchors, 0/3 probes) after 4h26m. Four local families ≤35B all
+collapse at 120k depth. **The depth collapse is the model, not the runtime and
+not the device.**
+
+What replaced it: **per-chapter scoped calls in a ~10-30k envelope**, merged by
+code. Same gemma4:26b that produced 1,267 words whole-book produces 11,553
+words with **901 anchors, 0 bad** scoped, and recovers precision facts every
+whole-book local arm missed. So for NoLlama the serving profile inverts:
+- KV pool: `--cache-size-gb 12` was a whole-book requirement. Scoped needs
+  ~1-3 GB. The 15+ GB advice in secondreader's `models.ini` block applies only
+  to the retired path.
+- The **prefix cache matters far more now, not less**: scoped runs issue one
+  call per chapter sharing a fixed instruction preamble, so `--idle-timeout 0`
+  + prewarm turns every chapter after the first into a warm-prefix hit. Whole-
+  book had one giant prefix reused across few calls; scoped has a small prefix
+  reused across dozens.
+- Uncancellable-backend hygiene still stands (attempts=1, generous timeout) —
+  but at 10-30k the death spiral is far less reachable.
 
 ## Gemma 4 on the NPU (2026-08-07)
 
