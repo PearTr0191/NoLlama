@@ -141,6 +141,38 @@ const eq = (name, actual, expected) => actual === expected ? pass++ : (fail++, c
   has('para not nested in table', inlinePara, '<td>1</td><td>2</td>');
 })();
 
+// --- table edge cases ---
+(() => {
+  // code span in a cell keeps its underscores (mdInline-once + guard)
+  const codeCell = mdEscapeAndRender('| Var |\n|---|\n| `snake_case` |');
+  has('code span in cell', codeCell, '<td><code>snake_case</code></td>');
+
+  // javascript: link inside a cell is NOT turned into a clickable href
+  const xssCell = mdEscapeAndRender('| Bad |\n|---|\n| [click](javascript:alert(1)) |');
+  notHas('xss link in cell has no href', xssCell, '<a href="javascript');
+
+  // attribute injection via the IMAGE alt is neutralised
+  const attrCell = mdEscapeAndRender('| Bad |\n|---|\n| ![x" onerror="alert(1)](y.png) |');
+  notHas('attr-injection img neutralised', attrCell, ' onerror="alert');
+
+  // a header immediately before a table (no blank line) still closes the header
+  const afterHeader = mdEscapeAndRender('# Title\n| a |\n|---|');
+  has('header then table', afterHeader, '<h1>Title</h1><table>');
+
+  // separator with no body rows still closes <tbody>
+  const headerOnly = mdEscapeAndRender('| a |\n|---|');
+  has('header-only table closes tbody', headerOnly, '<thead><tr><th>a</th></tr></thead><tbody></tbody></table>');
+
+      // empty cells round-trip (a/b land in thead/tbody; empty cell => <td></td>)
+  const emptyCell = mdEscapeAndRender('| a | |\n|---|---|\n| b | |');
+  has('empty cells render', emptyCell, '<th>a</th><th></th></tr></thead><tbody><tr><td>b</td><td></td></tr>');
+
+  // alignment colons (left / right / center) are accepted and still render
+  const align = mdEscapeAndRender('| a | b |\n|:--|--:|\n| 1 | 2 |');
+  has('align colons header', align, '<th>a</th><th>b</th>');
+  has('align colons body', align, '<td>1</td><td>2</td>');
+})();
+
 // --- regression: the original creator's known-good cases ---
 (() => {
   has('bold', mdEscapeAndRender('**bold**'), '<strong>bold</strong>');
