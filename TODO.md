@@ -1,5 +1,32 @@
 # TODO
 
+## v0.9.1: shim fixes from the fresh-Ryzen first-contact test (2026-08-11)
+
+Live test of install-windows.bat on a fresh Win11 box (Ryzen 5950X/RX580):
+pwsh prompt, winget install, Store-stub detection and both re-run paths all
+worked -- but two things to fix:
+
+1. **pwsh probe missed after winget install.** The direct-continue probe only
+   checks `%ProgramFiles%\PowerShell\7\pwsh.exe`; winget did a per-user/MSIX
+   install, so the .bat fell back to "close and re-run". Also probe
+   `%LocalAppData%\Microsoft\WindowsApps\pwsh.exe`.
+2. **Don't make Python the user's problem.** NoLlama needs Python, the user
+   shouldn't need to know. Cheap version: install via winget automatically
+   (notice, not Y/N prompt), then skip the second re-run by probing
+   `%LocalAppData%\Programs\Python\Python3xx\python.exe` and passing it to
+   install.ps1 via a new `-PythonExe` param (install.ps1 currently only does
+   Get-Command python/python3).
+
+## Later: uv instead of system Python
+
+The thorough answer to "don't require Python": `uv` is a single static
+binary, no admin, that fetches its own private CPython and builds the venv
+(and installs deps much faster than pip). Would remove the Python
+prerequisite entirely -- but means reworking install.ps1's venv creation,
+so it's a minor-version project, not a patch.
+
+---
+
 ## Load GGUF directly — openvino-genai already can (2026-08-06)
 
 openvino-genai 2026.1 ships a **GGUF reader** we don't expose at all
