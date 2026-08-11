@@ -8,6 +8,7 @@ __pycache__/
 bench-results/
 scripts/.watch_title
 scripts/.watch_body.md
+.claude/
 
 # Runtime artifacts (generated at run time, not source)
 nollama-openclaw.log
