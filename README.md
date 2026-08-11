@@ -946,7 +946,11 @@ locks. They don't interfere with each other.
 
 ```
 nollama.py              The server
-install.ps1             Setup wizard
+install-windows.bat     Windows entry point — double-click me (installs
+                        PowerShell 7 + Python if missing, runs install.ps1)
+install-linux.sh        Linux entry point — checks pwsh/python3, prints the
+                        install command for your distro, runs install.ps1
+install.ps1             Setup wizard (cross-platform; the shims above call it)
 download-model.ps1      Download/convert any HuggingFace model
 benchmark.py            Device performance benchmark
 start.ps1               Auto-generated launcher (after install)
@@ -973,12 +977,14 @@ The repo is pure code.
   - Any Intel CPU (slower, but works)
 - ~1-17 GB disk per model
 
-`install.ps1` handles the venv, dependencies, and model download.
-**There is no `install.sh`** — `install.ps1` *is* the cross-platform
-installer, and **Linux users must use it too** (there is no Bash
-alternative). On Linux/macOS run it with PowerShell 7
-(`pwsh ./install.ps1`, including flags like `-HfToken`); paths and link
-creation branch on `$IsWindows`. Windows is the primary platform, but
+`install.ps1` handles the venv, dependencies, and model download. It *is*
+the installer on every platform — `install-windows.bat` and
+`install-linux.sh` are thin entry-point shims that check the
+prerequisites above (offering to install what's missing) and then hand
+off to it. There is deliberately no separate Bash installer: on
+Linux/macOS the shim runs `pwsh ./install.ps1` for you (flags like
+`-HfToken` pass through); paths and link creation branch on
+`$IsWindows`. Windows is the primary platform, but
 **Linux is confirmed working** by user reports (Core Ultra 7 258V, NPU +
 GPU detected — see [#6](https://github.com/aweussom/NoLlama/issues/6));
 macOS is untested. On Linux, NPU and GPU detection needs the Intel
