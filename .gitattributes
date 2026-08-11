@@ -1,0 +1,8 @@
+# Shims must keep their native line endings regardless of core.autocrlf:
+# cmd.exe misparses LF-only blocks; sh chokes on CRLF.
+install-windows.bat text eol=crlf
+install-linux.sh text eol=lf
+
+# Keep dev-only directories out of `git archive` (the release ZIP).
+.claude export-ignore
+.github export-ignore

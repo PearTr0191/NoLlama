@@ -15,6 +15,8 @@ Usage:
     python nollama.py --scan                                 # what models do I have?
 """
 
+__version__ = "0.9.0"
+
 import argparse
 import base64
 import hashlib
@@ -1886,7 +1888,8 @@ def health():
     # prompt_cache stays a bare bool — start-openclaw.ps1's health check
     # truth-tests it; the details live in prompt_cache_info (per-slot TTFT
     # and prewarm state are in each device's info block).
-    result = {"status": overall_status(), "devices": devices,
+    result = {"status": overall_status(), "version": __version__,
+              "devices": devices,
               "prompt_cache": PROMPT_CACHE,
               "prompt_cache_info": {
                   "enabled": PROMPT_CACHE,
@@ -2759,6 +2762,8 @@ def parse_args():
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
+    p.add_argument("--version", action="version",
+                   version=f"NoLlama {__version__}")
     default_model = str(Path(__file__).parent / "model")
     p.add_argument("--model-dir", default=default_model,
                    help="Primary model directory (default: model/)")
@@ -2943,7 +2948,7 @@ def main():
     ports_msg = f"port {args.port}"
     if args.ollama_port:
         ports_msg += f" + Ollama on {args.ollama_port}"
-    print(f"  Starting server on {ports_msg}...", flush=True)
+    print(f"  NoLlama {__version__} starting on {ports_msg}...", flush=True)
 
     threads = []
     t = threading.Thread(

@@ -56,6 +56,17 @@ NoLlama unloads idle slots after 30 minutes (`--idle-timeout`).
 
 ## Quick start
 
+**No git?** Download the latest release ZIP from
+[Releases](https://github.com/aweussom/NoLlama/releases/latest), unzip it, then:
+
+- **Windows** — double-click **`install-windows.bat`**. It checks for
+  PowerShell 7 and Python 3.10+, offers to install whatever is missing
+  (via winget), then runs the real installer.
+- **Linux** — run **`./install-linux.sh`**. Same checks; it prints the
+  exact install command for your distro if something is missing.
+
+Already have PowerShell 7 and Python 3.10+ (or cloned the repo):
+
 ```powershell
 .\install.ps1
 .\start.ps1
@@ -65,6 +76,24 @@ That's it. `install.ps1` detects your hardware, lets you pick a model,
 downloads it, and generates `start.ps1`. The launcher waits for the
 model to load (with a progress indicator), then opens the built-in
 chat UI in your browser at http://localhost:8000.
+
+### Getting PowerShell 7
+
+NoLlama's installer needs PowerShell 7+ — the 5.1 that Windows ships is
+too old, and Linux doesn't ship it at all. The shims above handle this
+for you; to do it yourself:
+
+```powershell
+# Windows 10/11
+winget install --id Microsoft.PowerShell --source winget
+```
+
+```bash
+# Ubuntu
+sudo snap install powershell --classic
+```
+
+Other distros: [Microsoft's install docs](https://learn.microsoft.com/powershell/scripting/install/installing-powershell-on-linux).
 
 ## Recommended models
 
