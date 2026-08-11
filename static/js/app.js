@@ -639,6 +639,7 @@ async function sendMessage() {
     const userDiv = addMessage('user', '');
     userDiv.innerHTML = displayHtml.replace(/\n/g, '<br>');
     chatHistory.push({ role: 'user', content: userContent });
+    updateHistoryWarning();
 
     // Clear input
     input.value = '';
@@ -760,13 +761,77 @@ async function sendMessage() {
         setGenerating(false);
         abortController = null;
         input.focus();
+        updateHistoryWarning();
     }
+}
+
+// --- History-length warning ---
+// NPU slots cap the prompt at MAX_PROMPT_LEN=4096 tokens (~16k chars). There's
+// no client-side tokenizer, so this nudges on a rough ~4 chars/token estimate
+// when accumulated history passes ~12000 chars (~3k tokens, near the cap).
+// Approximate by design — it's a warning, not an enforcement.
+// The banner (markup + styles) is created entirely here in app.js — no
+// template or stylesheet edits required.
+const HISTORY_WARN_CHARS = 12000;
+
+function historyCharCount() {
+    let chars = 0;
+    for (const m of chatHistory) {
+        const c = m.content;
+        if (typeof c === 'string') {
+            chars += c.length;
+        } else if (Array.isArray(c)) {
+            for (const part of c) {
+                if (part && typeof part.text === 'string') chars += part.text.length;
+            }
+        }
+    }
+    return chars;
+}
+
+function updateHistoryWarning() {
+    const warn = document.getElementById('history-warning');
+    if (warn) warn.hidden = historyCharCount() < HISTORY_WARN_CHARS;
+}
+
+// Create the warning banner and its stylesheet in JS and slide it above the
+// input. Kept hidden until the history estimate crosses the threshold.
+function initHistoryWarning() {
+    const host = document.querySelector('.input-area .input-wrap');
+    if (!host || document.getElementById('history-warning')) return;
+
+    const style = document.createElement('style');
+    style.textContent = [
+        '.history-warning{display:flex;align-items:center;justify-content:space-between;gap:10px;background:#2b2416;border:1px solid #8a6d1f;color:#e8ce8a;border-radius:6px;font-size:12.5px;line-height:1.4;padding:6px 10px}',
+        '.history-warning[hidden]{display:none}',
+        '.history-warning button{background:#8a6d1f;color:#141414;border:none;border-radius:4px;padding:3px 9px;font-size:12px;font-weight:600;cursor:pointer;white-space:nowrap;flex-shrink:0}',
+        '.history-warning button:hover,.history-warning button:focus-visible{background:#a5832a;outline:2px solid var(--accent);outline-offset:1px}',
+    ].join('\n');
+    document.head.appendChild(style);
+
+    const warn = document.createElement('div');
+    warn.className = 'history-warning';
+    warn.id = 'history-warning';
+    warn.hidden = true;
+
+    const span = document.createElement('span');
+    span.textContent = 'Long chat — the NPU model may start truncating.';
+
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.textContent = 'Start a new chat (Ctrl+N)';
+    btn.addEventListener('click', newChat);
+
+    warn.appendChild(span);
+    warn.appendChild(btn);
+    host.insertBefore(warn, host.firstChild);
 }
 
 function newChat() {
     chatHistory = [];
     chat.innerHTML = '';
     input.focus();
+    updateHistoryWarning();
 }
 
 // --- Image handling ---
@@ -909,4 +974,5 @@ document.addEventListener('keydown', (e) => {
 });
 
 // --- Start ---
+initHistoryWarning();
 init();
