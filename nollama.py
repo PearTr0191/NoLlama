@@ -2949,6 +2949,12 @@ def main():
     if args.ollama_port:
         ports_msg += f" + Ollama on {args.ollama_port}"
     print(f"  NoLlama {__version__} starting on {ports_msg}...", flush=True)
+    # The same port serves both — people wiring up an agent read the API
+    # lines, people who just installed need to be told the chat UI exists.
+    print(f"  Web UI (chat):  http://localhost:{args.port}/", flush=True)
+    print(f"  OpenAI API:     http://localhost:{args.port}/v1", flush=True)
+    if args.ollama_port:
+        print(f"  Ollama API:     http://localhost:{args.ollama_port}", flush=True)
 
     threads = []
     t = threading.Thread(
