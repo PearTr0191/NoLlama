@@ -242,6 +242,13 @@ Ollama better than NoLlama could, and that's the right tool for that
 hardware. NoLlama's value is specifically the Intel NPU / ARC story
 that Ollama doesn't tell.
 
+One honest footnote: the **CPU path happens to run on any AVX2 x86**,
+because OpenVINO's CPU plugin doesn't actually care whose name is on
+the silicon. Measured on an AMD Ryzen 9 5950X (fresh Windows 11,
+installed from the release ZIP): 23 tok/s, TTFT 360 ms, on a small
+thinking model. Not supported, not tuned for, works fine — non-Intel
+GPUs stay filtered out, but nobody will stop your CPU.
+
 ### Benchmark (Core Ultra 7 258V, ARC 140V 16 GB) — laptop, LPDDR5X
 
 Tested with `benchmark.py` — 1 warmup + 5 runs, outliers discarded.
