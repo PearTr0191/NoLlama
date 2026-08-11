@@ -2955,6 +2955,11 @@ def main():
     print(f"  OpenAI API:     http://localhost:{args.port}/v1", flush=True)
     if args.ollama_port:
         print(f"  Ollama API:     http://localhost:{args.ollama_port}", flush=True)
+    else:
+        # Off for one of two reasons: --ollama-port 0, or the port was busy
+        # (real Ollama running — the earlier WARNING says so). Print the state
+        # either way: an omitted line is not information.
+        print("  Ollama API:     disabled", flush=True)
 
     threads = []
     t = threading.Thread(
