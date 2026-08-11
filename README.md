@@ -418,6 +418,17 @@ NoLlama is a different target: your laptop.
 OVMS is a proper inference server. NoLlama is the thing that makes
 your Core Ultra feel like Ollama already ran on it.
 
+### ...and why not llm-scaler-vllm?
+
+Same answer, different Intel stack. [`intel/llm-scaler`](https://github.com/intel/llm-scaler)
+(vLLM + IPEX, the Battlematrix software) is Intel's official serving
+path for **Arc Pro B-series** cards — and if you're building a
+dedicated Linux inference box around B60s, use it: batch throughput
+and multi-GPU scaling are its whole point. It's also Ubuntu-with-a-
+specific-kernel, Docker, and Linux-only for the vLLM path. NoLlama is
+for the machines you actually sit at — Windows or Linux, NPU + iGPU +
+CPU included, no containers. Different jobs, both real.
+
 ## Usage
 
 ```powershell
