@@ -54,6 +54,36 @@ NoLlama unloads idle slots after 30 minutes (`--idle-timeout`).
 > models means two NoLlama instances on different ports, or — better — the
 > split above.
 
+## Speed at a glance
+
+Measured steady-state decode, tok/s, int4 weights. Every number is from a
+real run on hardware named below — no vendor sheets. Rule of thumb behind
+all of them: **decode ≈ practical memory bandwidth ÷ active weight bytes**,
+because LLM decode streams the whole model per token.
+
+| Model (int4) | NPU | iGPU | Arc dGPU | CPU (DDR5) | CPU (DDR4) |
+|---|---|---|---|---|---|
+| SmolLM3-3B (~2 GB) | 23.3 ᵃ | 29.7 ᵃ | *wanted* | 37.5 ᵃ | 23.0 ᵇ |
+| Qwen3-8B (~5 GB) | 10.0 ᵃ | 21.7 ᶜ / 15.4 ᵃ | *wanted* | 17.8 ᵃ | *wanted* |
+| Qwen3-30B-A3B MoE (~17 GB, ~2 GB active) | n/a — over the NPU's size class | 25.3 ᶜ (`--offload-ratio 30`) | *wanted* (B60 numbers coming) | ~6 † | — needs >32 GB RAM |
+
+ᵃ Core Ultra 9 **285K** desktop — DDR5-6400 (~100 GB/s), 4-core Xe-LPG iGPU, NPU 3.
+ᵇ AMD Ryzen 9 **5950X** — DDR4 (~50 GB/s). Unsupported-but-measured; see below.
+ᶜ Core Ultra 7 **258V** laptop — Arc 140V iGPU on LPDDR5X-8533 (~136 GB/s).
+† 285K CPU at *whole-novel context* (~6 tok/s) — KV reads eat bandwidth at that
+scale; no clean short-context CPU number for the MoE yet.
+
+Reading it: the memory column, not the device column, predicts most of the
+table (the laptop iGPU beats the desktop's because its *memory* is faster).
+Protocols vary slightly across rows — the [benchmark sections](#benchmark-core-ultra-7-258v-arc-140v-16-gb--laptop-lpddr5x)
+have the methodology; treat cells as ±10%. For scale: an RTX 5090 does 197
+tok/s on the same 8B via Ollama — the [desktop benchmark](#benchmark-core-ultra-9-285k-rtx-5090--desktop-ddr5)
+explains why NoLlama doesn't compete there.
+
+Every *wanted* cell is an open invitation: run it, report it in
+[#24](https://github.com/aweussom/NoLlama/issues/24), and your number lands
+here with credit. **Arc A-series owners especially.**
+
 ## Quick start
 
 **No git?** Download the latest release ZIP from
