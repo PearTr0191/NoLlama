@@ -153,6 +153,22 @@ body {
 }
 .message p { margin: 4px 0; }
 .message ul, .message ol { margin: 4px 0 4px 20px; }
+.message table {
+    border-collapse: collapse;
+    margin: 6px 0;
+    font-size: 13px;
+    max-width: 100%;
+}
+.message th, .message td {
+    border: 1px solid var(--border);
+    padding: 4px 10px;
+    text-align: left;
+}
+.message th {
+    background: var(--input-bg);
+    font-weight: 600;
+    white-space: nowrap;
+}
 
 .copy-btn {
     position: absolute;
