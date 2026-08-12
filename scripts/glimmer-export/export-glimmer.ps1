@@ -40,8 +40,11 @@ if ($LASTEXITCODE -ne 0) {
     Write-Host "[1/2] Installing deps (transformers from git clone - Glimmer needs main)..."
     & $py -m pip install --find-links "$Workspace\wheels" `
         opencv-python nncf openvino accelerate safetensors einops
-    & $py -m pip install "$Workspace\transformers"
     & $py -m pip install -e "$Workspace\optimum-intel"
+    # LAST, deliberately: optimum-intel pins transformers<5.6, and pip enforces
+    # that by downgrading whatever is present. Glimmer only exists on
+    # transformers main, so override the pin after; pip warns but obeys.
+    & $py -m pip install "$Workspace\transformers"
 } else { Write-Host "[1/2] Deps already installed - skipping." }
 
 # --- Stage 2: the grind (NOT resumable mid-run) ------------------------------
