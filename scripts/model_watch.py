@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """Model watcher — notify when new NoLlama-relevant models appear on Hugging Face.
 
-Polls the Hugging Face Hub for two orgs:
-  - OpenVINO  : Intel's pre-exported, ready-to-run models (what NoLlama loads).
-  - Qwen      : upstream base models (early heads-up before Intel exports them),
-                filtered to the families NoLlama actually wants (Coder / VL / Omni).
+Polls the Hugging Face Hub for these orgs:
+  - OpenVINO    : Intel's pre-exported, ready-to-run models (what NoLlama loads).
+  - Qwen        : upstream base models (early heads-up before Intel exports them),
+                  filtered to the families NoLlama actually wants (Coder / VL / Omni).
+  - nvidia      : Nemotron family (3.5 Lightning is a wanted agent model — blocked
+                  on optimum-intel nemotron_h support, PR #1789).
+  - meta-models : Muse Glimmer family (30B multimodal agent model, Apache 2.0).
 
 Diffs the current relevant set against a committed snapshot (seen_models.json).
 New ids are reported; the snapshot is updated so you're not re-pinged. On the
@@ -39,13 +42,26 @@ API = "https://huggingface.co/api/models"
 # OpenVINO org carries lots of non-LLM assets (diffusion, detection, etc.).
 # Keep only ids that look like a model family NoLlama serves.
 OPENVINO_RELEVANT = re.compile(
-    r"(qwen|coder|-vl|vl-|whisper|gemma|phi|deepseek|mistral|llama|internvl|granite|smol)",
+    r"(qwen|coder|-vl|vl-|whisper|gemma|phi|deepseek|mistral|llama|internvl|granite|smol"
+    r"|nemotron|glimmer)",
     re.I,
 )
-# Upstream Qwen org is huge; only surface the families NoLlama would want, and
-# drop quant/format re-uploads that aren't the thing we'd export ourselves.
-QWEN_WANT = re.compile(r"(coder|-vl|vl-|omni)", re.I)
-QWEN_SKIP = re.compile(r"(gguf|awq|gptq|mlx|fp8|-base|autoround|eagle)", re.I)
+# Quant/format re-uploads that aren't the thing we'd export ourselves.
+UPSTREAM_SKIP = re.compile(r"(gguf|awq|gptq|mlx|fp8|fp4|-base|autoround|eagle|dflash)", re.I)
+
+# Things NoLlama can actually serve. Gated orgs (nvidia) brand everything
+# "nemotron" — rewards, embedders, OCR — so name alone is too broad there.
+SERVABLE_PIPELINES = {"text-generation", "image-text-to-text"}
+
+# org -> (want, skip, gate_pipeline) over the repo name. skip=None keeps
+# everything want hits; gate_pipeline=True additionally requires a
+# SERVABLE_PIPELINES pipeline_tag.
+WATCHES = {
+    "OpenVINO": (OPENVINO_RELEVANT, None, False),
+    "Qwen": (re.compile(r"(coder|-vl|vl-|omni)", re.I), UPSTREAM_SKIP, False),
+    "nvidia": (re.compile(r"nemotron", re.I), UPSTREAM_SKIP, True),
+    "meta-models": (re.compile(r"glimmer", re.I), UPSTREAM_SKIP, True),
+}
 
 
 def fetch_org(author, limit=1000):
@@ -59,18 +75,17 @@ def fetch_org(author, limit=1000):
 
 def relevant(author, models):
     """Filter an org's model list to NoLlama-relevant ids."""
+    want, skip, gate_pipeline = WATCHES[author]
     out = {}
     for m in models:
         mid = m.get("id") or m.get("modelId") or ""
         if not mid:
             continue
         repo = mid.split("/", 1)[-1]
-        if author == "OpenVINO":
-            if not OPENVINO_RELEVANT.search(repo):
-                continue
-        else:  # Qwen upstream
-            if not QWEN_WANT.search(repo) or QWEN_SKIP.search(repo):
-                continue
+        if not want.search(repo) or (skip and skip.search(repo)):
+            continue
+        if gate_pipeline and m.get("pipeline_tag") not in SERVABLE_PIPELINES:
+            continue
         out[mid] = {
             "created": (m.get("createdAt") or "")[:10],
             "downloads": m.get("downloads", 0),
@@ -117,7 +132,7 @@ def set_output(key, value):
 
 def main():
     current = {}
-    for author in ("OpenVINO", "Qwen"):
+    for author in WATCHES:
         try:
             current.update(relevant(author, fetch_org(author)))
         except (urllib.error.URLError, urllib.error.HTTPError, ValueError, TimeoutError) as e:
@@ -167,7 +182,8 @@ def main():
         "| | Model | Org | Created | Task | DLs/mo | ♥ |\n"
         "|---|---|---|---|---|---|---|\n"
         + "\n".join(rows)
-        + "\n\n_Watched orgs: OpenVINO (ready-to-run) + Qwen (upstream Coder/VL/Omni). "
+        + "\n\n_Watched orgs: OpenVINO (ready-to-run), Qwen (upstream Coder/VL/Omni), "
+        "nvidia (Nemotron), meta-models (Muse Glimmer). "
         "To add one, drop it into the matching block of `models.json`._"
     )
     TITLE_FILE.write_text(f"Model watch: {len(new_ids)} new model(s) on Hugging Face",
