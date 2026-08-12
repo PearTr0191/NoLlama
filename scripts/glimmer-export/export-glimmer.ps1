@@ -33,11 +33,14 @@ if (-not (Test-Path "$venv\Scripts\python.exe")) {
     python -m venv $venv
 }
 $py = "$venv\Scripts\python.exe"
-& $py -c "import optimum.intel" 2>$null
+# muse_glimmer is NOT in any released transformers (the checkpoint was made by
+# 5.15.0.dev0) — it must come from the git clone. Verify that, not just imports.
+& $py -c "import optimum.intel; from transformers.models.auto.configuration_auto import CONFIG_MAPPING; assert 'muse_glimmer' in CONFIG_MAPPING" 2>$null
 if ($LASTEXITCODE -ne 0) {
-    Write-Host "[1/2] Installing deps (wheelhouse first, PyPI for the rest)..."
+    Write-Host "[1/2] Installing deps (transformers from git clone - Glimmer needs main)..."
     & $py -m pip install --find-links "$Workspace\wheels" `
-        "transformers==5.15" opencv-python nncf openvino accelerate safetensors einops
+        opencv-python nncf openvino accelerate safetensors einops
+    & $py -m pip install "$Workspace\transformers"
     & $py -m pip install -e "$Workspace\optimum-intel"
 } else { Write-Host "[1/2] Deps already installed - skipping." }
 

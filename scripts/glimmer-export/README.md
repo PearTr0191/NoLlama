@@ -13,6 +13,8 @@ needs ~80 GB free — weights, venv and output live there, not in this repo):
 ```
 
 Notes:
+- `muse_glimmer` is not in any *released* transformers (the checkpoint was made
+  by `5.15.0.dev0`) — export-glimmer installs transformers from the git clone.
 - The export loads 60 GB BF16 through RAM: fine on a 64–128 GB workstation,
   hours of pagefile grinding on a 32 GB laptop. Not resumable mid-run.
 - `run-export.py` invokes optimum-cli's parser via Python because corporate
