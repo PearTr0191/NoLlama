@@ -67,7 +67,8 @@ if (Test-Path "$out\openvino_language_model.xml") {
     Write-Host "`nDone. int4 IR at: $out"
     Get-ChildItem $out | Sort-Object Length -Descending |
         Select-Object Name, @{n='GB';e={[math]::Round($_.Length/1GB,2)}} -First 8
-    Write-Host "Upload when happy:  hf upload aweussom/Muse-Glimmer-30B-int4-ov `"$out`" ."
+    Write-Host "Upload when happy (hf.exe may be absent/AV-blocked; use the venv python):"
+    Write-Host "  & `"$py`" -c `"from huggingface_hub import create_repo, upload_folder; create_repo('aweussom/Muse-Glimmer-30B-int4-ov', exist_ok=True); upload_folder(repo_id='aweussom/Muse-Glimmer-30B-int4-ov', folder_path=r'$out')`""
 } else {
     Write-Warning "Export did not produce the expected IR - check $log (tail below)."
     Get-Content $log -Tail 20
