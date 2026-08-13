@@ -45,8 +45,13 @@ warmed up in 2.9s and streamed at ~2.8 tok/s, looked like a win.
 
 **Verdict:** don't, on any current iGPU family, until a new OpenVINO GPU
 plugin passes the comprehension test below. Xe-LPG fails loudly at warmup
-(`Count is called for dynamic shape`). Xe2 (Arc 140V, OpenVINO 2026.3) is
-the trap: it runs and *looks* healthy, but inference is numerically wrong —
+(`Count is called for dynamic shape`). Xe2 (Arc 140V, OpenVINO 2026.3,
+Windows) is the trap: it runs and *looks* healthy, but inference is
+numerically wrong — and a community report (issue #24, 2026-08-13)
+reproduced the identical fingerprint on **Xe3** (Arc B390 iGPU, Panther
+Lake, **Fedora**), so this is the GPU plugin's handling of the graph,
+not one generation's numerics or one OS's driver. All failures so far
+are iGPUs (shared-memory path); discrete Battlemage is untested —
 the model half-perceives the prompt (asked `Respond only with the text
 "HELLO!"`, its think channel quoted the user as saying "Respond only text"),
 hallucinates content that was never sent (an entire fake system prompt),

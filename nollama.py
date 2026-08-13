@@ -1755,17 +1755,20 @@ class OptimumSlot(DeviceSlot):
         self._preflight_memory(vlm=False)
         self._lazy_import()
         if self.device_name == "GPU":
-            # Two observed GPU-plugin failure modes, both expensive to hit:
+            # Observed GPU-plugin failure modes, both expensive to hit:
             # Xe-LPG compiles for minutes then dies at warmup on a dynamic-
-            # shape op; Xe2 (Arc 140V, OpenVINO 2026.3) warms up fine but
-            # SILENTLY computes garbage — the model half-perceives the
-            # prompt, hallucinates, and greedy-loops (same IR is correct on
-            # CPU). Warn before the compile, not after.
+            # shape op; Xe2 (Arc 140V, Windows) and Xe3 (Arc B390 iGPU,
+            # Linux — issue #24 report) warm up fine but SILENTLY compute
+            # garbage — the model half-perceives the prompt, hallucinates,
+            # and greedy-loops (same IR is correct on CPU). Three iGPU
+            # generations, two OSes: assume every iGPU is affected.
+            # Discrete Battlemage is untested. Warn before the compile.
             print(f"  [GPU] WARNING: the optimum backend on GPU is "
                   f"plugin-dependent — Xe-LPG iGPUs fail at warmup "
-                  f"('dynamic shape'), and Xe2 (140V) runs but produces "
-                  f"corrupted output (verified 2026-08-13); --device CPU "
-                  f"is the only verified-correct choice", flush=True)
+                  f"('dynamic shape'); Xe2 (140V) and Xe3 (B390) iGPUs run "
+                  f"but produce corrupted output (openvino issue #37419); "
+                  f"--device CPU is the only verified-correct choice",
+                  flush=True)
         print(f"  [{self.device_name}] Loading (optimum-intel runtime)...",
               flush=True)
         from optimum.intel import OVModelForCausalLM, OVModelForVisualCausalLM

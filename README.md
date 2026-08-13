@@ -235,14 +235,21 @@ Glimmer correctly** — use `--device CPU`:
 
 - **Xe-LPG** (desktop Arrow Lake iGPU): fails loudly at warmup
   (`Count is called for dynamic shape`).
-- **Xe2** (Arc 140V, verified 2026-08-13): loads and warms up fine, then
-  **silently computes garbage** — the model half-perceives the prompt
-  (drops words, hallucinates a system prompt that was never sent) and
-  greedy decoding degenerates into a two-word loop inside the think
+- **Xe2** (Arc 140V, Windows, verified 2026-08-13): loads and warms up
+  fine, then **silently computes garbage** — the model half-perceives the
+  prompt (drops words, hallucinates a system prompt that was never sent)
+  and greedy decoding degenerates into a two-word loop inside the think
   channel. The same IR with the same sampling params comprehends and
   complies perfectly on CPU. There is no error to catch: the only symptom
-  is a model that seems drunk. Re-verify when OpenVINO ships a new GPU
-  plugin (this is also the go/no-go check for serving Glimmer on a B60).
+  is a model that seems drunk.
+- **Xe3** (Arc B390 iGPU in Core Ultra X7 358H, **Linux**, community
+  report in issue #24, 2026-08-13): identical corruption fingerprint —
+  same "the user message is garbled" half-perception, same think-loop
+  hang under greedy. Three iGPU generations and two OSes rule out any
+  Windows-driver or Xe2-specific theory; tracked upstream as
+  [openvinotoolkit/openvino#37419](https://github.com/openvinotoolkit/openvino/issues/37419).
+  Discrete Battlemage (dedicated VRAM, different memory path) is the one
+  untested configuration — the comprehension test below is its go/no-go.
 
 The catch is the python stack: these models need transformers **from git
 main** plus optimum-intel **from git main**, which no NoLlama venv pins.
