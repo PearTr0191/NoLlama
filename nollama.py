@@ -736,6 +736,13 @@ def explain_genai_error(e):
 _TOOL_CALL_RE = re.compile(r"<tool_call>\s*(.*?)\s*</tool_call>", re.DOTALL)
 _FUNCTION_RE = re.compile(r"<function=([^>\s]+)\s*>(.*?)</function>", re.DOTALL)
 _PARAM_RE = re.compile(r"<parameter=([^>\s]+)\s*>(.*?)</parameter>", re.DOTALL)
+# Muse Glimmer ATEM protocol (see the model's chat_template.jinja)
+_ATEM_BLOCK_RE = re.compile(
+    r"<atem:function_calls>\s*(.*?)\s*</atem:function_calls>", re.DOTALL)
+_ATEM_INVOKE_RE = re.compile(
+    r'<atem:invoke name="([^"]+)"\s*>(.*?)</atem:invoke>', re.DOTALL)
+_ATEM_PARAM_RE = re.compile(
+    r'<atem:parameter name="([^"]+)"\s*>(.*?)</atem:parameter>', re.DOTALL)
 
 # Other model families emit their own native tool-call syntax. A small model
 # often ignores our Qwen3-Coder system prompt and falls back to whatever it was
@@ -958,8 +965,9 @@ def parse_tool_calls(text, tools):
 
     Returns (content_text, tool_calls) where tool_calls is a list of OpenAI
     tool_call dicts (empty if none found). Handles Qwen3-Coder XML, Hermes-style
-    JSON-in-<tool_call>, Mistral [TOOL_CALLS], Llama <|python_tag|>, DeepSeek's
-    <｜tool▁calls▁begin｜> blocks, and a bare JSON fallback.
+    JSON-in-<tool_call>, Muse Glimmer ATEM blocks, Mistral [TOOL_CALLS], Llama
+    <|python_tag|>, DeepSeek's <｜tool▁calls▁begin｜> blocks, and a bare JSON
+    fallback.
     """
     param_types = _tool_param_types(tools)
     known = set(param_types)
@@ -996,6 +1004,23 @@ def parse_tool_calls(text, tools):
                 if name:
                     add(name, args)
         return content, tool_calls
+
+    # Muse Glimmer native: ATEM <atem:function_calls> blocks (the model's own
+    # chat template renders tool calls this way, so this is what it emits no
+    # matter what format our rendered prompt asks for).
+    atem_blocks = _ATEM_BLOCK_RE.findall(text)
+    if atem_blocks:
+        content = _ATEM_BLOCK_RE.sub("", text).strip()
+        for block in atem_blocks:
+            for name, params in _ATEM_INVOKE_RE.findall(block):
+                name = name.strip()
+                args = {}
+                for k, v in _ATEM_PARAM_RE.findall(params):
+                    k = k.strip()
+                    args[k] = _coerce_value(v, param_types.get(name, {}).get(k, "string"))
+                add(name, args)
+        if tool_calls:
+            return content, tool_calls
 
     # Qwen2.5-Coder native: bare <function=NAME>...</function> with NO
     # surrounding <tool_call> wrapper. The Qwen2.5-Coder models emit this form
@@ -1537,6 +1562,87 @@ class DeviceSlot:
 # Optimum-intel slot — python-runtime backend for architectures GenAI can't run
 # ---------------------------------------------------------------------------
 
+class _AtemStreamFilter:
+    """Incremental translator for Muse Glimmer's ATEM channel stream.
+
+    The model emits harmony-style channels after the generation prompt
+    ('<|start|>assistant'): ' to=self<|message|>reasoning<|eom|>' then
+    '<|start|>assistant to=user<|message|>answer<|eot|>'. NoLlama's surface
+    for reasoning is <think> blocks (the web UI collapses them, agents skip
+    them), so: to=self content -> <think>...</think>, to=user -> plain text,
+    tool channels (to=<name>) -> passthrough (the ATEM XML flows to
+    parse_tool_calls). Feed decoded text WITH special tokens; markers may
+    split across chunks, so a possible marker prefix is held back.
+    """
+
+    _MARKERS = ("<|start|>", "<|message|>", "<|eom|>", "<|eot|>", "<|return|>")
+    _END = ("<|eom|>", "<|eot|>", "<|return|>")
+
+    def __init__(self):
+        self._buf = ""
+        self._in_header = True   # generation prompt ends mid-header
+        self._thinking = False
+        self._done = False
+
+    def _held_tail(self):
+        """Length of the buffer tail that could be the start of a marker."""
+        for ln in range(min(len(self._buf), 11), 0, -1):
+            tail = self._buf[-ln:]
+            if any(m.startswith(tail) for m in self._MARKERS):
+                return ln
+        return 0
+
+    def feed(self, text):
+        if self._done:
+            return ""
+        self._buf += text
+        out = []
+        while True:
+            if self._in_header:
+                i = self._buf.find("<|message|>")
+                if i < 0:
+                    break  # header still streaming — swallow, wait
+                header = self._buf[:i]
+                self._buf = self._buf[i + len("<|message|>"):]
+                self._in_header = False
+                if "to=self" in header:
+                    self._thinking = True
+                    out.append("<think>")
+                continue
+            hits = [(self._buf.find(m), m) for m in self._MARKERS]
+            hits = [(p, m) for p, m in hits if p >= 0]
+            if not hits:
+                held = self._held_tail()
+                emit = self._buf[:-held] if held else self._buf
+                self._buf = self._buf[-held:] if held else ""
+                if emit:
+                    out.append(emit)
+                break
+            pos, marker = min(hits)
+            if self._buf[:pos]:
+                out.append(self._buf[:pos])
+            self._buf = self._buf[pos + len(marker):]
+            if self._thinking and marker in self._END:
+                out.append("</think>\n")
+                self._thinking = False
+            if marker in ("<|eot|>", "<|return|>"):
+                self._done = True  # end of turn — drop any trailing decode
+                self._buf = ""
+                break
+            if marker in ("<|eom|>", "<|start|>"):
+                self._in_header = True  # next channel header follows
+        return "".join(out)
+
+    def close(self):
+        """Flush whatever remains (worker ended mid-channel)."""
+        rest = "" if (self._in_header or self._done) else self._buf
+        self._buf = ""
+        if self._thinking:
+            self._thinking = False
+            return rest + "</think>\n"
+        return rest
+
+
 _HF_PENALTY_NOTED = [False]
 
 
@@ -1627,6 +1733,14 @@ class OptimumSlot(DeviceSlot):
                 f"know this architecture ({e}) — the model-lab venv carries "
                 f"transformers from git main, which does.")
         self.tokenizer = AutoTokenizer.from_pretrained(model_dir)
+        # Muse Glimmer streams ATEM channel markers (reasoning/user/tool
+        # routing) — those need translating; other architectures stream plain
+        # text and get special tokens stripped at the streamer instead.
+        try:
+            with open(os.path.join(model_dir, "config.json")) as f:
+                self._atem = json.load(f).get("model_type") == "muse_glimmer"
+        except Exception:
+            self._atem = False
         self.pipe = self.model  # inherited ensure_loaded/unload key on .pipe
 
     def _stopping_criteria(self):
@@ -1667,8 +1781,12 @@ class OptimumSlot(DeviceSlot):
         """Same contract as DeviceSlot.stream_tokens, over TextIteratorStreamer."""
         from transformers import TextIteratorStreamer
 
+        # ATEM models need the channel markers (special tokens) visible to the
+        # filter; plain models get them stripped by the streamer directly.
+        atem = _AtemStreamFilter() if getattr(self, "_atem", False) else None
         streamer = TextIteratorStreamer(
-            self.tokenizer, skip_prompt=True, skip_special_tokens=True,
+            self.tokenizer, skip_prompt=True,
+            skip_special_tokens=atem is None,
             timeout=heartbeat)  # None → block forever (non-stream join)
         self._stream_error = None
 
@@ -1698,7 +1816,12 @@ class OptimumSlot(DeviceSlot):
                 yield None  # heartbeat marker
                 continue
             except StopIteration:
+                tail = atem.close() if atem else ""
+                if tail:
+                    yield tail
                 return
+            if atem is not None:
+                chunk = atem.feed(chunk)
             if chunk:
                 yield chunk
 
