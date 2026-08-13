@@ -49,6 +49,13 @@ After `git pull` + Ctrl+F5: toggle no-think on, ask something simple.
 - No change at all → the directive needs to be the *whole* control line;
   check the rendered prompt with `--debug` to see what the template emitted.
 
+## Carried over from the 08-06/07 session log (previous content of this file,
+## preserved in git history — everything else there shipped or was archived
+## into README/TODONT/CLAUDE.md)
+
+- Qwen3.5-4B vision verdict for the registry note (models.json).
+- SmolLM3 registry notes could mention thinking-mode + `/no_think`.
+
 ## 4. Then
 
 - Merge `optimum-backend` → `main` when satisfied (all verification was green;
