@@ -246,13 +246,19 @@ Glimmer correctly** — use `--device CPU`:
 
 The catch is the python stack: these models need transformers **from git
 main** plus optimum-intel **from git main**, which no NoLlama venv pins.
-Use the **model-lab venv** that `scripts\glimmer-export\` builds
-(`C:\devel\aweussom\glimmer-port\venv-export`), one-time prep:
+`install-optimum.ps1` (Windows and Linux, needs git on PATH) builds a
+dedicated `venv-optimum/` with the right stack in the right order — the
+order matters: optimum-intel pins `transformers<5.6`, so the git
+transformers goes in last to override it:
 
 ```powershell
-venv-export\Scripts\python.exe -m pip install flask openvino-genai pillow
-venv-export\Scripts\python.exe nollama.py --model-dir ~\models\Muse-Glimmer-30B-int4-ov --device GPU --idle-timeout 0
+.\install-optimum.ps1
+venv-optimum\Scripts\python.exe nollama.py --model-dir ~\models\Muse-Glimmer-30B-int4-ov --device CPU --idle-timeout 0
 ```
+
+(`--device CPU` is deliberate — see the iGPU verdicts above. If upstream
+main breaks, pin with `-TransformersRef <commit>` / `-OptimumIntelRef
+<commit>`.)
 
 Running a plain install against such a model exits immediately with an
 error naming this section instead of failing minutes into the load. When
