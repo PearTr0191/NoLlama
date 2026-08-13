@@ -1724,6 +1724,14 @@ class OptimumSlot(DeviceSlot):
             raise RuntimeError(integrity_err)
         self._preflight_memory(vlm=False)
         self._lazy_import()
+        if self.device_name == "GPU":
+            # The failure mode is expensive: the whole graph compiles (many
+            # minutes on a big model) before the first inference can hit a
+            # dynamic-shape op the GPU plugin can't run. Warn before, not after.
+            print(f"  [GPU] note: the optimum backend on GPU is "
+                  f"plugin-dependent — Xe-LPG iGPUs fail at warmup "
+                  f"('dynamic shape'); --device CPU is the safe choice",
+                  flush=True)
         print(f"  [{self.device_name}] Loading (optimum-intel runtime)...",
               flush=True)
         from optimum.intel import OVModelForCausalLM, OVModelForVisualCausalLM
