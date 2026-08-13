@@ -24,7 +24,9 @@ Then serve with it:
 #>
 param(
     [string]$Python = 'python',
-    [string]$VenvDir = "$PSScriptRoot\venv-optimum",
+    # Join-Path, not "\": a literal backslash lands in the Linux path
+    # (found by the first Fedora user, issue #24).
+    [string]$VenvDir = (Join-Path $PSScriptRoot 'venv-optimum'),
     # Pin these to a commit/tag if main breaks; defaults track upstream.
     [string]$TransformersRef = 'main',
     [string]$OptimumIntelRef = 'main'
