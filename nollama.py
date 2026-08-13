@@ -232,7 +232,11 @@ def parse_messages(messages, max_dim):
 
     for msg in messages:
         role = msg.get("role", "user")
-        content = msg.get("content", "")
+        # `or ""`: OpenAI clients legally send "content": null (assistant
+        # turns that carried only tool_calls — Zed does this); .get's default
+        # covers a missing key, not an explicit null, and iterating None was
+        # a 500 (issue #24 report, 'NoneType' surfaced in Zed).
+        content = msg.get("content") or ""
 
         if isinstance(content, str):
             content = _strip_history_think(role, content)
@@ -2700,7 +2704,7 @@ def ollama_chat():
     internal_messages = []
     for msg in ollama_messages:
         role = msg.get("role", "user")
-        content = msg.get("content", "")
+        content = msg.get("content") or ""  # explicit null is legal, see parse_messages
         msg_images = msg.get("images", [])
 
         if msg_images:
