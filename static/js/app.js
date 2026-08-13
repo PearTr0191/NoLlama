@@ -17,8 +17,10 @@ const tempValue = document.getElementById('temp-value');
 const noThinkCheckbox = document.getElementById('no-think');
 // The last sentence is Muse Glimmer's native reasoning control (its chat
 // template defers to a system-prompt 'Reasoning strength:' line, default
-// high); other models read it as ordinary prose.
-const NO_THINK_PROMPT = 'Respond directly and concisely. Do not use <think> blocks or internal reasoning. Reasoning strength: low.';
+// high); other models read it as ordinary prose. Never mention '<think>'
+// here: the model mimics the literal tags into its answer text (observed
+// on Glimmer 2026-08-13).
+const NO_THINK_PROMPT = 'Respond directly and concisely, with no internal reasoning preamble. Reasoning strength: minimal.';
 
 // Temperature slider display
 temperatureSlider.addEventListener('input', () => {
@@ -604,7 +606,16 @@ async function sendMessage() {
     // src as visible text.
     const userDiv = addMessage('user', '');
     userDiv.innerHTML = displayHtml.replace(/\n/g, '<br>');
-    chatHistory.push({ role: 'user', content: userContent });
+    const userMsg = { role: 'user', content: userContent };
+    chatHistory.push(userMsg);
+    // A send the model never saw (server not ready, network error) must not
+    // stay in history: it becomes a stale user turn silently prepended to
+    // every later request — two consecutive user messages read as a corrupted
+    // transcript to the model (observed on Glimmer: it answers the wrong turn).
+    const dropUserMsg = () => {
+        const i = chatHistory.lastIndexOf(userMsg);
+        if (i >= 0) chatHistory.splice(i, 1);
+    };
 
     // Clear input
     input.value = '';
@@ -647,6 +658,7 @@ async function sendMessage() {
         const model = resp.headers.get('X-Model') || '';
 
         if (!resp.ok) {
+            dropUserMsg();
             const err = await resp.json();
             assistantDiv.innerHTML = `<span style="color:var(--error)">${escapeHtml(err.error?.message || 'Error')}</span>`;
             return;
@@ -718,8 +730,11 @@ async function sendMessage() {
         }
     } catch (err) {
         if (err.name === 'AbortError') {
+            // Deliberate cancel: keep the user message — justAnswerMe's retry
+            // (and a manual re-ask) still needs it in history.
             assistantDiv.innerHTML += '<br><span style="color:var(--text-dim)">[cancelled]</span>';
         } else {
+            dropUserMsg();
             assistantDiv.innerHTML = `<span style="color:var(--error)">${escapeHtml(err.message)}</span>`;
         }
     } finally {

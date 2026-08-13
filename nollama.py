@@ -208,6 +208,22 @@ def pil_to_tensor(img, max_dim):
 # Request parsing
 # ---------------------------------------------------------------------------
 
+# Reasoning we emitted to the client (<think> blocks) comes back verbatim in
+# the next turn's history — clients echo assistant content as-is. It must not
+# reach the model again: Muse Glimmer reasons on a separate ATEM channel, so
+# <think> text inside an assistant-to-user turn reads as a corrupted transcript
+# (observed: the model calls a clean follow-up question "garbled nonsense"),
+# and for every model it burns prompt tokens on stale reasoning. Leading block
+# only — that's where our stream filter puts it; anything later is quoted text.
+_LEADING_THINK_RE = re.compile(r"^\s*<think>.*?</think>\s*", re.DOTALL)
+
+
+def _strip_history_think(role, text):
+    if role == "assistant":
+        return _LEADING_THINK_RE.sub("", text, count=1)
+    return text
+
+
 def parse_messages(messages, max_dim):
     """Parse OpenAI messages. Returns (text_prompt, images, raw_messages)."""
     text_parts = []
@@ -219,6 +235,7 @@ def parse_messages(messages, max_dim):
         content = msg.get("content", "")
 
         if isinstance(content, str):
+            content = _strip_history_think(role, content)
             text_parts.append(content)
             raw_messages.append({"role": role, "content": content})
             continue
@@ -239,7 +256,7 @@ def parse_messages(messages, max_dim):
                     # of which turn asked the question.
                     msg_text.append(f"<ov_genai_image_{len(images) - 1}>")
 
-        joined = " ".join(msg_text)
+        joined = _strip_history_think(role, " ".join(msg_text))
         text_parts.append(joined)
         raw_messages.append({"role": role, "content": joined})
 
@@ -294,11 +311,20 @@ def _device_mem_bytes(device_name, device_id):
     return None
 
 
+# Compiled-model caches OpenVINO writes INSIDE the model dir on first GPU
+# load (optimum-intel defaults CACHE_DIR to <model>/model_cache). The .blob
+# mirrors the weights, so counting it doubles the apparent model size and
+# turns the memory preflight into a false alarm on every run after the first.
+_CACHE_DIR_NAMES = {"model_cache", ".cache"}
+
+
 def _dir_size_bytes(model_dir):
-    """Total size of a model directory (≈ weight bytes). None on failure."""
+    """Size of a model directory excluding cache subdirs (≈ weight bytes).
+    None on failure."""
     try:
         total = 0
-        for root, _dirs, files in os.walk(model_dir):
+        for root, dirs, files in os.walk(model_dir):
+            dirs[:] = [d for d in dirs if d not in _CACHE_DIR_NAMES]
             for fn in files:
                 total += os.path.getsize(os.path.join(root, fn))
         return total or None
@@ -1725,13 +1751,17 @@ class OptimumSlot(DeviceSlot):
         self._preflight_memory(vlm=False)
         self._lazy_import()
         if self.device_name == "GPU":
-            # The failure mode is expensive: the whole graph compiles (many
-            # minutes on a big model) before the first inference can hit a
-            # dynamic-shape op the GPU plugin can't run. Warn before, not after.
-            print(f"  [GPU] note: the optimum backend on GPU is "
+            # Two observed GPU-plugin failure modes, both expensive to hit:
+            # Xe-LPG compiles for minutes then dies at warmup on a dynamic-
+            # shape op; Xe2 (Arc 140V, OpenVINO 2026.3) warms up fine but
+            # SILENTLY computes garbage — the model half-perceives the
+            # prompt, hallucinates, and greedy-loops (same IR is correct on
+            # CPU). Warn before the compile, not after.
+            print(f"  [GPU] WARNING: the optimum backend on GPU is "
                   f"plugin-dependent — Xe-LPG iGPUs fail at warmup "
-                  f"('dynamic shape'); --device CPU is the safe choice",
-                  flush=True)
+                  f"('dynamic shape'), and Xe2 (140V) runs but produces "
+                  f"corrupted output (verified 2026-08-13); --device CPU "
+                  f"is the only verified-correct choice", flush=True)
         print(f"  [{self.device_name}] Loading (optimum-intel runtime)...",
               flush=True)
         from optimum.intel import OVModelForCausalLM, OVModelForVisualCausalLM
@@ -1780,6 +1810,13 @@ class OptimumSlot(DeviceSlot):
         inputs = self.tokenizer.apply_chat_template(
             raw_messages, add_generation_prompt=True,
             return_tensors="pt", return_dict=True)
+        if debug:
+            # The request dump above shows messages as the CLIENT sent them
+            # (pre-sanitization); this is the prompt the model actually gets.
+            print(f"{datetime.now():%H:%M:%S} [DEBUG/{self.device_name}] "
+                  f"rendered prompt:\n"
+                  f"{self.tokenizer.decode(inputs['input_ids'][0])}",
+                  flush=True)
         self.model.generate(
             **inputs, streamer=streamer,
             stopping_criteria=self._stopping_criteria(),
