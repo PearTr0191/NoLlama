@@ -3,6 +3,29 @@
 Things we tried that didn't work, or that work but aren't worth doing. Each
 entry explains *why not* so we don't re-litigate it in six months.
 
+## Glimmer (optimum backend) on Intel iGPUs (2026-08-13)
+
+Idea: serve Muse-Glimmer-30B int4 on the iGPU instead of CPU — the 140V
+warmed up in 2.9s and streamed at ~2.8 tok/s, looked like a win.
+
+**Verdict:** don't, on any current iGPU family, until a new OpenVINO GPU
+plugin passes the comprehension test below. Xe-LPG fails loudly at warmup
+(`Count is called for dynamic shape`). Xe2 (Arc 140V, OpenVINO 2026.3) is
+the trap: it runs and *looks* healthy, but inference is numerically wrong —
+the model half-perceives the prompt (asked `Respond only with the text
+"HELLO!"`, its think channel quoted the user as saying "Respond only text"),
+hallucinates content that was never sent (an entire fake system prompt),
+and greedy decoding degenerates into a two-word loop inside the think
+channel that never ends. The identical IR with identical sampling on CPU
+quotes the instruction verbatim and complies exactly. Diagnosed 2026-08-13
+after three red herrings (think-block history round-trip, stale failed
+sends in web-UI history — both real bugs, both fixed, neither the cause).
+
+**Comprehension test** (cheap, definitive): multi-turn chat, ask
+`Respond only with the text "HELLO!"`, expand the thinking. If the model
+can't quote the instruction back, the plugin is corrupting inference —
+no error is raised anywhere. This is also the B60 acceptance test.
+
 ## Port-availability check via bind() probe (2026-05 -> 2026-08-11)
 
 What we had: check_port() tried bind(("0.0.0.0", port)) and treated success
@@ -162,6 +185,27 @@ variant* -- no self-export attempts before that, even though the incoming
 B60 (24 GB) matches Meta's stated 4-bit envelope. The gate is support, not
 hardware. The model-watch bot tracks the OpenVINO org, so the gate opening
 files its own issue; nothing to poll.
+
+**Update 2026-08-13 — two of the three walls fell within 48 h; decision
+superseded by events.** optimum-intel merged `muse_glimmer` support the
+evening the entry above was written (PR #1924, 2026-08-11); we exported
+int4 on the 128 GB workstation the next day and published it
+(`aweussom/Muse-Glimmer-30B-int4-ov`, ~17 GB) — the export cost turned out
+to be one lounge afternoon, not a project. transformers wall: solved by the
+model-lab venv (git-main stack, `scripts/glimmer-export/`). The third wall
+(genai VLM arch) was *bypassed*, not climbed: the `optimum-backend` branch
+serves `muse_glimmer`/`nemotron_h` through optimum-intel's python runtime
+(`OptimumSlot`), text-only, tools working. What this does NOT supersede:
+the model-class analysis above. Dense 28B is still the wrong shape for the
+desktop's scoped-chapter workload, and the quality gate (beat
+`gemma4-26b-a4b` scoped on the 5090) still stands for *that* use. The slot
+exists because (a) it's one implementation serving two models — Nemotron
+3.5 Lightning is 30B-**A3B** MoE, which fits the throughput argument
+perfectly (optimum-intel `nemotron_h` export merged 2026-08-12, PR #1789) —
+and (b) OpenClaw/agent use on owned hardware is a different workload than
+scoped book runs. Ollama-side quality signal so far: Glimmer subjectively
+best-in-class on secondreader (5090, 2026-08-12), formal facts-scoped run
+still pending.
 
 ## Whole-book (100k+) prompts on CPU serving (2026-08-09)
 

@@ -218,6 +218,55 @@ and two of them (offload, bigger-than-RAM CPU) were impossible before
 OpenVINO 2026.3 and the MoE era. Decode is the whole story here; on
 thinking models multiply by your patience.
 
+## Brand-new architectures: the optimum backend
+
+Some architectures land in optimum-intel (export) before openvino_genai
+(serving) learns to run them — as of 2026-08 that's **Meta Muse Glimmer**
+(`muse_glimmer`, [our int4 export](https://huggingface.co/aweussom/Muse-Glimmer-30B-int4-ov))
+and **NVIDIA Nemotron 3.5 Lightning** (`nemotron_h`). NoLlama serves these
+through optimum-intel's python runtime instead: detection is automatic
+(`--scan` shows a `Backend` line; `--backend` overrides), tool calling
+works, and both API surfaces behave identically. Differences from GenAI
+slots: **text-only for now** (images get a clean 400), no prefix cache /
+prewarm (a GenAI feature), no `--offload-ratio`, and no NPU. GPU support
+also depends on the OpenVINO GPU plugin executing the model's
+dynamic-shape graph, and as of OpenVINO 2026.3 **no Intel iGPU family runs
+Glimmer correctly** — use `--device CPU`:
+
+- **Xe-LPG** (desktop Arrow Lake iGPU): fails loudly at warmup
+  (`Count is called for dynamic shape`).
+- **Xe2** (Arc 140V, verified 2026-08-13): loads and warms up fine, then
+  **silently computes garbage** — the model half-perceives the prompt
+  (drops words, hallucinates a system prompt that was never sent) and
+  greedy decoding degenerates into a two-word loop inside the think
+  channel. The same IR with the same sampling params comprehends and
+  complies perfectly on CPU. There is no error to catch: the only symptom
+  is a model that seems drunk. Re-verify when OpenVINO ships a new GPU
+  plugin (this is also the go/no-go check for serving Glimmer on a B60).
+
+The catch is the python stack: these models need transformers **from git
+main** plus optimum-intel **from git main**, which no NoLlama venv pins.
+Use the **model-lab venv** that `scripts\glimmer-export\` builds
+(`C:\devel\aweussom\glimmer-port\venv-export`), one-time prep:
+
+```powershell
+venv-export\Scripts\python.exe -m pip install flask openvino-genai pillow
+venv-export\Scripts\python.exe nollama.py --model-dir ~\models\Muse-Glimmer-30B-int4-ov --device GPU --idle-timeout 0
+```
+
+Running a plain install against such a model exits immediately with an
+error naming this section instead of failing minutes into the load. When
+openvino_genai gains these architectures, `--backend genai` (or just
+re-exporting) moves them onto the faster path with prefix caching.
+
+Measured (Muse Glimmer 30B int4, short chat prompts, 2026-08-13):
+Core Ultra 7 258V laptop CPU 1.4 tok/s / TTFT 12.9 s; Core Ultra 9 285K
+desktop CPU 2.6 tok/s / TTFT 9.6 s. Dense-30B bandwidth physics — fine
+for verification, not agent loops; a 24 GB Arc-class card is the real
+host. Note Glimmer *always* reasons by default (`reasoning_strength`
+defaults to high in its template); the web UI's no-think toggle sends its
+native `Reasoning strength: low.` directive.
+
 ## What it does
 
 - **OpenAI API** (`/v1/chat/completions`) — works with any OpenAI client, OpenWebUI, etc.
