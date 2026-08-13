@@ -37,6 +37,12 @@ param(
 
     [string]$HfToken,
 
+    # Alternate venv for the conversion (default: <repo>\venv). Lets a scratch
+    # venv carry a model-specific stack — e.g. an older transformers for
+    # trust-remote-code models written against it (#27) — without touching
+    # the venv NoLlama serves from.
+    [string]$Venv = "",
+
     # Catch-all so GNU-style flags (--convert) produce a helpful message
     # instead of PowerShell's cryptic "positional parameter cannot be
     # found" binder error (#19).
@@ -53,7 +59,7 @@ if ($ExtraArgs) {
         Write-Host "  Try:  .\download-model.ps1 $HfId -Convert -Weight int8 -Trust" -ForegroundColor Yellow
     } else {
         Write-Host "ERROR: Unrecognized argument(s): $($ExtraArgs -join ', ')" -ForegroundColor Red
-        Write-Host "  Flags: -Convert -Weight <int4|int8> -Trust -Output <dir> -HfToken <token>" -ForegroundColor Yellow
+        Write-Host "  Flags: -Convert -Weight <int4|int8> -Trust -Output <dir> -HfToken <token> -Venv <dir>" -ForegroundColor Yellow
     }
     exit 1
 }
@@ -69,9 +75,13 @@ if ($HfToken) {
 
 # Activate venv (Scripts on Windows, bin on POSIX)
 $VenvBinDir = if ($IsWindows) { "Scripts" } else { "bin" }
-$VenvActivate = Join-Path $ScriptDir "venv" $VenvBinDir "Activate.ps1"
+$VenvRoot = if ($Venv) { $Venv } else { Join-Path $ScriptDir "venv" }
+$VenvActivate = Join-Path $VenvRoot $VenvBinDir "Activate.ps1"
 if (Test-Path $VenvActivate) {
     & $VenvActivate
+} elseif ($Venv) {
+    Write-Host "ERROR: -Venv given but $VenvActivate not found." -ForegroundColor Red
+    exit 1
 } else {
     Write-Host "WARNING: No venv found. Using system Python." -ForegroundColor Yellow
 }
@@ -145,13 +155,15 @@ if ($Convert) {
         Write-Host "    - Check that optimum-intel is installed: pip install optimum[openvino]" -ForegroundColor Yellow
         Write-Host "    - Some architectures aren't supported yet by optimum-intel" -ForegroundColor Yellow
         Write-Host "    - 'Maximum required is X, got: Y': transformers is too new for this" -ForegroundColor Yellow
-        Write-Host "      architecture's exporter. In the venv: pip install `"transformers==X`"" -ForegroundColor Yellow
-        Write-Host "      (the version the error names), then rerun." -ForegroundColor Yellow
+        Write-Host "      architecture's exporter — it needs transformers==X (the version the" -ForegroundColor Yellow
+        Write-Host "      error names). Build a scratch venv so the serving venv stays intact:" -ForegroundColor Yellow
+        Write-Host "        python -m venv venv-convert" -ForegroundColor Yellow
+        Write-Host "        venv-convert\Scripts\pip install `"optimum-intel[openvino]>=1.27`" `"transformers==X`"" -ForegroundColor Yellow
+        Write-Host "        rerun this script with:  -Venv venv-convert" -ForegroundColor Yellow
         Write-Host "    - ImportError from the MODEL's own .py files (e.g. 'cannot import name" -ForegroundColor Yellow
         Write-Host "      LossKwargs'): trust-remote-code models ship modeling code written for" -ForegroundColor Yellow
-        Write-Host "      an older transformers (LossKwargs died in 4.56). In the venv:" -ForegroundColor Yellow
-        Write-Host "      pip install `"transformers==4.55.*`", rerun, then reinstall the usual" -ForegroundColor Yellow
-        Write-Host "      version (pip install -r requirements.txt)." -ForegroundColor Yellow
+        Write-Host "      an older transformers (LossKwargs died in 4.56). Same scratch-venv" -ForegroundColor Yellow
+        Write-Host "      recipe as above with transformers==4.55.*" -ForegroundColor Yellow
         Write-Host "    - 'DefaultCPUAllocator: not enough memory': conversion holds the full-" -ForegroundColor Yellow
         Write-Host "      precision model (MoE models: plus fp32 expert copies) in memory." -ForegroundColor Yellow
         Write-Host "      Raise the Windows pagefile (commit limit) and reboot, then rerun." -ForegroundColor Yellow
