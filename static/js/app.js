@@ -15,6 +15,10 @@ const newChatBtn = document.getElementById('new-chat-btn');
 const temperatureSlider = document.getElementById('temperature');
 const tempValue = document.getElementById('temp-value');
 const noThinkCheckbox = document.getElementById('no-think');
+// The last sentence is Muse Glimmer's native reasoning control (its chat
+// template defers to a system-prompt 'Reasoning strength:' line, default
+// high); other models read it as ordinary prose.
+const NO_THINK_PROMPT = 'Respond directly and concisely. Do not use <think> blocks or internal reasoning. Reasoning strength: low.';
 
 // Temperature slider display
 temperatureSlider.addEventListener('input', () => {
@@ -188,7 +192,7 @@ function buildRequestBody(overrides) {
     if (noThink) {
         // Prepend no-think system prompt
         messages = [
-            { role: 'system', content: 'Respond directly and concisely. Do not use <think> blocks or internal reasoning.' },
+            { role: 'system', content: NO_THINK_PROMPT },
             ...messages.filter(m => m.role !== 'system'),
         ];
     }
@@ -264,7 +268,7 @@ async function justAnswerMe(event) {
             signal: abortController.signal,
             body: JSON.stringify(buildRequestBody({
                 messages: [
-                    { role: 'system', content: 'Respond directly and concisely. Do not use <think> blocks or internal reasoning.' },
+                    { role: 'system', content: NO_THINK_PROMPT },
                     ...chatHistory.filter(m => m.role !== 'system'),
                 ],
             })),

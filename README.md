@@ -249,6 +249,14 @@ error naming this section instead of failing minutes into the load. When
 openvino_genai gains these architectures, `--backend genai` (or just
 re-exporting) moves them onto the faster path with prefix caching.
 
+Measured (Muse Glimmer 30B int4, short chat prompts, 2026-08-13):
+Core Ultra 7 258V laptop CPU 1.4 tok/s / TTFT 12.9 s; Core Ultra 9 285K
+desktop CPU 2.6 tok/s / TTFT 9.6 s. Dense-30B bandwidth physics — fine
+for verification, not agent loops; a 24 GB Arc-class card is the real
+host. Note Glimmer *always* reasons by default (`reasoning_strength`
+defaults to high in its template); the web UI's no-think toggle sends its
+native `Reasoning strength: low.` directive.
+
 ## What it does
 
 - **OpenAI API** (`/v1/chat/completions`) — works with any OpenAI client, OpenWebUI, etc.
