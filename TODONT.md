@@ -3,6 +3,41 @@
 Things we tried that didn't work, or that work but aren't worth doing. Each
 entry explains *why not* so we don't re-litigate it in six months.
 
+## GigaChat-20B-A3B conversion (2026-08-13, issue #27)
+
+Idea: Dmitriy Teteruk tried converting `ai-sage/GigaChat-20B-A3B-base`
+(Sber's DeepSeek-MoE-based 20B-A3B). On paper a good NoLlama shape — MoE,
+~3B active, would suit the offload path and the agent workload.
+
+**Verdict:** unconvertible today. He abandoned it and closed the issue.
+Don't recommend it or spend a download until upstream moves (conditions
+below).
+
+**Why not:**
+- The exporter is NOT the wall: optimum-intel registers `deepseek`
+  (`DeepseekOpenVINOConfig`, model_configs.py:4239 in the venv's 1.27
+  stack), alongside `deepseek_v2`/`deepseek_v3`.
+- The wall is the model repo's remote code. GigaChat ships its own
+  `modelling_deepseek.py` (trust-remote-code), which imports `LossKwargs`
+  from `transformers.utils` — removed in modern transformers. 4.55 still
+  failed for him; pinning 4.53.3 let the conversion start.
+- At 4.53.3 the stack then failed anyway — his final report: the model
+  "used old transformers version that is not compatible with openvino".
+  The exact second error was never captured, so we don't know whether that
+  wall is optimum/nncf versioning or something deeper.
+- Net: remote code needs transformers ≤4.53, the export stack needs newer,
+  and no overlap window was found. (Reading note: his closing comment
+  "Finally, it does now work" is missing a *not* — the rest of the
+  sentence and the issue closure make the meaning unambiguous.)
+
+Re-evaluate if: (a) Sber updates the repo's remote code for current
+transformers — the `LossKwargs` import is the visible blocker, and a hand
+shim (`class LossKwargs(TypedDict, total=False)` in a patched local copy)
+might bridge it for a determined attempt, unverified; (b) transformers
+gains a native implementation of the V1 `deepseek` MoE architecture so
+remote code isn't needed at all; (c) anyone captures the actual
+4.53.3-era failure, which would tell us what the second wall really is.
+
 ## Glimmer (optimum backend) on Intel iGPUs (2026-08-13)
 
 Idea: serve Muse-Glimmer-30B int4 on the iGPU instead of CPU — the 140V
