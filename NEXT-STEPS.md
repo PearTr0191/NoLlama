@@ -24,4 +24,7 @@ from that branch's checklist shipped or is recorded in README/TODONT.
   or an OpenVINO iGPU fix). Until then the README manual path
   (install-optimum.ps1) is the honest offering for the self-selecting
   few; CPU-only at 1.4-2.6 tok/s behind a menu item is a disappointment
-  machine. Re-check the stack gate alongside the Nemotron watch.
+  machine. Re-check the stack gate alongside the Nemotron watch. Any
+  automation experiment lives on its own branch (the optimum-backend
+  pattern: merge when verified, not before) — and don't cut that branch
+  until at least one gate has closed, or it rots against install.ps1.
