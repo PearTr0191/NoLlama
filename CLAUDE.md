@@ -41,6 +41,10 @@ OpenAI-compatible LLM/VLM server for Intel hardware. NPU-first.
 - Routing: images go to GPU, text goes to NPU (or GPU if no NPU)
 - Web UI: `templates/index.html` + `static/css/style.css` + `static/js/app.js`
 - Collapsible `<think>` blocks, "Just answer me, dammit!" button, temperature slider
+- Markdown rendering of responses/thinking (`mdEscapeAndRender`, PR #23) — hand-rolled, no
+  library; attribute values go through `escapeAttr` + `safeUrl` (scheme whitelist), never
+  `escapeHtml` alone (XSS fixed in review). Streaming scroll is pinned-but-releasable
+  (`streamState`/`updateStreamBubble`): follows the stream until the user scrolls up.
 - `threaded=True` on Flask, concurrency via per-device locks
 - `models.json` — curated model registry (npu, gpu_vlm, gpu_llm, whisper categories)
 - `install.ps1` detects devices, shows model menu, generates `start.ps1`. Agent setups get
