@@ -218,6 +218,33 @@ and two of them (offload, bigger-than-RAM CPU) were impossible before
 OpenVINO 2026.3 and the MoE era. Decode is the whole story here; on
 thinking models multiply by your patience.
 
+## Brand-new architectures: the optimum backend
+
+Some architectures land in optimum-intel (export) before openvino_genai
+(serving) learns to run them — as of 2026-08 that's **Meta Muse Glimmer**
+(`muse_glimmer`, [our int4 export](https://huggingface.co/aweussom/Muse-Glimmer-30B-int4-ov))
+and **NVIDIA Nemotron 3.5 Lightning** (`nemotron_h`). NoLlama serves these
+through optimum-intel's python runtime instead: detection is automatic
+(`--scan` shows a `Backend` line; `--backend` overrides), tool calling
+works, and both API surfaces behave identically. Differences from GenAI
+slots: **text-only for now** (images get a clean 400), no prefix cache /
+prewarm (a GenAI feature), no `--offload-ratio`, and no NPU.
+
+The catch is the python stack: these models need transformers **from git
+main** plus optimum-intel **from git main**, which no NoLlama venv pins.
+Use the **model-lab venv** that `scripts\glimmer-export\` builds
+(`C:\devel\aweussom\glimmer-port\venv-export`), one-time prep:
+
+```powershell
+venv-export\Scripts\python.exe -m pip install flask openvino-genai pillow
+venv-export\Scripts\python.exe nollama.py --model-dir ~\models\Muse-Glimmer-30B-int4-ov --device GPU --idle-timeout 0
+```
+
+Running a plain install against such a model exits immediately with an
+error naming this section instead of failing minutes into the load. When
+openvino_genai gains these architectures, `--backend genai` (or just
+re-exporting) moves them onto the faster path with prefix caching.
+
 ## What it does
 
 - **OpenAI API** (`/v1/chat/completions`) — works with any OpenAI client, OpenWebUI, etc.

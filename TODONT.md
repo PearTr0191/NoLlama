@@ -163,6 +163,27 @@ B60 (24 GB) matches Meta's stated 4-bit envelope. The gate is support, not
 hardware. The model-watch bot tracks the OpenVINO org, so the gate opening
 files its own issue; nothing to poll.
 
+**Update 2026-08-13 — two of the three walls fell within 48 h; decision
+superseded by events.** optimum-intel merged `muse_glimmer` support the
+evening the entry above was written (PR #1924, 2026-08-11); we exported
+int4 on the 128 GB workstation the next day and published it
+(`aweussom/Muse-Glimmer-30B-int4-ov`, ~17 GB) — the export cost turned out
+to be one lounge afternoon, not a project. transformers wall: solved by the
+model-lab venv (git-main stack, `scripts/glimmer-export/`). The third wall
+(genai VLM arch) was *bypassed*, not climbed: the `optimum-backend` branch
+serves `muse_glimmer`/`nemotron_h` through optimum-intel's python runtime
+(`OptimumSlot`), text-only, tools working. What this does NOT supersede:
+the model-class analysis above. Dense 28B is still the wrong shape for the
+desktop's scoped-chapter workload, and the quality gate (beat
+`gemma4-26b-a4b` scoped on the 5090) still stands for *that* use. The slot
+exists because (a) it's one implementation serving two models — Nemotron
+3.5 Lightning is 30B-**A3B** MoE, which fits the throughput argument
+perfectly (optimum-intel `nemotron_h` export merged 2026-08-12, PR #1789) —
+and (b) OpenClaw/agent use on owned hardware is a different workload than
+scoped book runs. Ollama-side quality signal so far: Glimmer subjectively
+best-in-class on secondreader (5090, 2026-08-12), formal facts-scoped run
+still pending.
+
 ## Whole-book (100k+) prompts on CPU serving (2026-08-09)
 
 Idea: serve secondreader's whole-novel prompts (~113k tokens) from the 285K
