@@ -3,6 +3,29 @@
 Things we tried that didn't work, or that work but aren't worth doing. Each
 entry explains *why not* so we don't re-litigate it in six months.
 
+## Glimmer (optimum backend) on Intel iGPUs (2026-08-13)
+
+Idea: serve Muse-Glimmer-30B int4 on the iGPU instead of CPU — the 140V
+warmed up in 2.9s and streamed at ~2.8 tok/s, looked like a win.
+
+**Verdict:** don't, on any current iGPU family, until a new OpenVINO GPU
+plugin passes the comprehension test below. Xe-LPG fails loudly at warmup
+(`Count is called for dynamic shape`). Xe2 (Arc 140V, OpenVINO 2026.3) is
+the trap: it runs and *looks* healthy, but inference is numerically wrong —
+the model half-perceives the prompt (asked `Respond only with the text
+"HELLO!"`, its think channel quoted the user as saying "Respond only text"),
+hallucinates content that was never sent (an entire fake system prompt),
+and greedy decoding degenerates into a two-word loop inside the think
+channel that never ends. The identical IR with identical sampling on CPU
+quotes the instruction verbatim and complies exactly. Diagnosed 2026-08-13
+after three red herrings (think-block history round-trip, stale failed
+sends in web-UI history — both real bugs, both fixed, neither the cause).
+
+**Comprehension test** (cheap, definitive): multi-turn chat, ask
+`Respond only with the text "HELLO!"`, expand the thinking. If the model
+can't quote the instruction back, the plugin is corrupting inference —
+no error is raised anywhere. This is also the B60 acceptance test.
+
 ## Port-availability check via bind() probe (2026-05 -> 2026-08-11)
 
 What we had: check_port() tried bind(("0.0.0.0", port)) and treated success

@@ -18,26 +18,16 @@ venv\Scripts\python.exe -c "import openvino as ov; print(ov.Core().get_property(
 
 ## 2. Glimmer on the 140V GPU — the Xe2 dynamic-shape question
 
-The workstation's Xe-LPG iGPU failed at first inference
-(`[GPU] Count is called for dynamic shape`, plugin limitation). Xe2 is a newer
-plugin path — unknown, and a free preview of how the B60 (same family) will
-behave.
-
-```powershell
-C:\devel\aweussom\glimmer-port\venv-export\Scripts\python.exe nollama.py --model-dir C:\Users\tommyl\models\Muse-Glimmer-30B-int4-ov --device GPU --port 18000 --idle-timeout 0 --no-prewarm
-```
-
-Expect a long compile before the verdict (the startup note warns about this).
-
-- **Fails with 'dynamic shape'** → Xe2 shares the limitation; B60 likely too
-  until an OpenVINO release fixes it. Record in README's optimum section
-  (change "Xe2 untested" to the finding) + TODONT one-liner. Optimum backend
-  stays CPU-only for Glimmer; still fully usable.
-- **Warmup completes** → the interesting outcome. Run 2-3 chat prompts in the
-  web UI, record from the log: warmup seconds, TTFT, steady tok/s (second
-  prompt onward). Compare against CPU 1.4 tok/s / TTFT 12.9 s (laptop) and
-  2.6 / 9.6 (workstation). Update the README measured line; this is also the
-  B60 preview number.
+**DONE 2026-08-13 — verdict: a third outcome nobody listed.** Warmup
+completes (2.9s, ~2.8 tok/s streaming) but inference is **numerically
+corrupt**: the model half-perceives the prompt, hallucinates unsent content,
+greedy-loops in the think channel. Same IR + same params on CPU is exact.
+Recorded in README optimum section + TODONT (with the comprehension test to
+re-run on new OpenVINO releases and on the B60). Optimum backend stays
+CPU-only for Glimmer. Diagnosis unearthed two real NoLlama bugs, both fixed:
+assistant `<think>` content round-tripping into history (server now strips
+in `parse_messages`), and failed sends lingering in web-UI chatHistory
+(consecutive user turns read as a corrupted transcript).
 
 ## 3. no-think directive check (any machine, browser only)
 

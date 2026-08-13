@@ -230,9 +230,19 @@ works, and both API surfaces behave identically. Differences from GenAI
 slots: **text-only for now** (images get a clean 400), no prefix cache /
 prewarm (a GenAI feature), no `--offload-ratio`, and no NPU. GPU support
 also depends on the OpenVINO GPU plugin executing the model's
-dynamic-shape graph — Glimmer fails on a Xe-LPG desktop iGPU
-(`Count is called for dynamic shape`) and must use `--device CPU` there;
-Xe2 (140V/Arc) untested so far.
+dynamic-shape graph, and as of OpenVINO 2026.3 **no Intel iGPU family runs
+Glimmer correctly** — use `--device CPU`:
+
+- **Xe-LPG** (desktop Arrow Lake iGPU): fails loudly at warmup
+  (`Count is called for dynamic shape`).
+- **Xe2** (Arc 140V, verified 2026-08-13): loads and warms up fine, then
+  **silently computes garbage** — the model half-perceives the prompt
+  (drops words, hallucinates a system prompt that was never sent) and
+  greedy decoding degenerates into a two-word loop inside the think
+  channel. The same IR with the same sampling params comprehends and
+  complies perfectly on CPU. There is no error to catch: the only symptom
+  is a model that seems drunk. Re-verify when OpenVINO ships a new GPU
+  plugin (this is also the go/no-go check for serving Glimmer on a B60).
 
 The catch is the python stack: these models need transformers **from git
 main** plus optimum-intel **from git main**, which no NoLlama venv pins.
