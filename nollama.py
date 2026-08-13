@@ -690,6 +690,12 @@ def explain_genai_error(e):
         # pool (seen with 30B-class models + big agent prompts, issue #21).
         return (f"{msg} — likely the KV-cache pool is too small for this "
                 f"prompt: raise --cache-size-gb (currently {PROMPT_CACHE_GB} GB)")
+    if "dynamic shape" in msg and "[GPU]" in msg:
+        # GPU plugin limitation, not a loading conflict: some optimum-exported
+        # graphs (e.g. Muse Glimmer's inputs_embeds LM) keep shapes dynamic in
+        # ways the GPU plugin can't execute. Observed on Xe-LPG (285K iGPU).
+        return (f"{msg} — the OpenVINO GPU plugin cannot run this model's "
+                f"dynamic-shape graph on this GPU; serve it with --device CPU")
     if "Compilation failed" in msg and ("NPU" in msg or "ZE_RESULT" in msg or "vpux" in msg):
         # NPU (vpux) compiler rejected the model — a model/driver-combination
         # problem, not a busy device (issue #20). Known trigger: an INT4
@@ -3110,7 +3116,7 @@ def _load_in_background(slot, model_dir, devices, port, ollama_port, banner_slot
         slot.status = "error"
         print(f"\n  [{slot.device_name}] ERROR: Failed to load model: {explain_genai_error(e)}")
         if not any(s in str(e) for s in ("Could not find a model", "is truncated",
-                                         "Compilation failed")):
+                                         "Compilation failed", "dynamic shape")):
             # Device-contention hint only where it's plausible — for a
             # missing/truncated model or a compiler failure it sends people
             # chasing ghosts (#17, #20 — the latter is literally titled

@@ -228,7 +228,11 @@ through optimum-intel's python runtime instead: detection is automatic
 (`--scan` shows a `Backend` line; `--backend` overrides), tool calling
 works, and both API surfaces behave identically. Differences from GenAI
 slots: **text-only for now** (images get a clean 400), no prefix cache /
-prewarm (a GenAI feature), no `--offload-ratio`, and no NPU.
+prewarm (a GenAI feature), no `--offload-ratio`, and no NPU. GPU support
+also depends on the OpenVINO GPU plugin executing the model's
+dynamic-shape graph — Glimmer fails on a Xe-LPG desktop iGPU
+(`Count is called for dynamic shape`) and must use `--device CPU` there;
+Xe2 (140V/Arc) untested so far.
 
 The catch is the python stack: these models need transformers **from git
 main** plus optimum-intel **from git main**, which no NoLlama venv pins.
