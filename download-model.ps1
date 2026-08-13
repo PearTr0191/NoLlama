@@ -147,6 +147,11 @@ if ($Convert) {
         Write-Host "    - 'Maximum required is X, got: Y': transformers is too new for this" -ForegroundColor Yellow
         Write-Host "      architecture's exporter. In the venv: pip install `"transformers==X`"" -ForegroundColor Yellow
         Write-Host "      (the version the error names), then rerun." -ForegroundColor Yellow
+        Write-Host "    - ImportError from the MODEL's own .py files (e.g. 'cannot import name" -ForegroundColor Yellow
+        Write-Host "      LossKwargs'): trust-remote-code models ship modeling code written for" -ForegroundColor Yellow
+        Write-Host "      an older transformers (LossKwargs died in 4.56). In the venv:" -ForegroundColor Yellow
+        Write-Host "      pip install `"transformers==4.55.*`", rerun, then reinstall the usual" -ForegroundColor Yellow
+        Write-Host "      version (pip install -r requirements.txt)." -ForegroundColor Yellow
         Write-Host "    - 'DefaultCPUAllocator: not enough memory': conversion holds the full-" -ForegroundColor Yellow
         Write-Host "      precision model (MoE models: plus fp32 expert copies) in memory." -ForegroundColor Yellow
         Write-Host "      Raise the Windows pagefile (commit limit) and reboot, then rerun." -ForegroundColor Yellow
