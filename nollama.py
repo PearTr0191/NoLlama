@@ -1733,6 +1733,11 @@ class OptimumSlot(DeviceSlot):
                 f"know this architecture ({e}) — the model-lab venv carries "
                 f"transformers from git main, which does.")
         self.tokenizer = AutoTokenizer.from_pretrained(model_dir)
+        # We always pass max_new_tokens; a max_length in the model's
+        # generation_config.json makes transformers warn about the pair on
+        # every request. Drop it once here instead.
+        if getattr(self.model, "generation_config", None) is not None:
+            self.model.generation_config.max_length = None
         # Muse Glimmer streams ATEM channel markers (reasoning/user/tool
         # routing) — those need translating; other architectures stream plain
         # text and get special tokens stripped at the streamer instead.
@@ -3446,8 +3451,17 @@ def main():
         )
         watchdog.start()
     elif PREWARM_FILE and not args.prewarm:
-        print(f"  Prewarm auto-enabled (--idle-timeout 0): "
-              f"{os.path.basename(PREWARM_FILE)} (--no-prewarm to disable)", flush=True)
+        if primary_cls is OptimumSlot and secondary_cls is not DeviceSlot:
+            # No GenAI LLM slot to warm — prompts are still captured to the
+            # file (useful if the model later moves to a GenAI export), but
+            # nothing prefills at startup. Don't promise otherwise.
+            print(f"  Prewarm: inert on the optimum backend (no prefix cache); "
+                  f"prompts still captured to "
+                  f"{os.path.basename(PREWARM_FILE)}", flush=True)
+        else:
+            print(f"  Prewarm auto-enabled (--idle-timeout 0): "
+                  f"{os.path.basename(PREWARM_FILE)} (--no-prewarm to disable)",
+                  flush=True)
 
     # Suppress Flask's default "Serving Flask app" banner — we have our own
     import logging
