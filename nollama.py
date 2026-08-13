@@ -3087,6 +3087,13 @@ def parse_args():
                         "(name, precision, architecture, integrity) and exit. "
                         "Searches the NoLlama directory and ~/models by "
                         "default; pass directories to search those instead.")
+    p.add_argument("--backend", choices=("auto", "genai", "optimum"),
+                   default="auto",
+                   help="Runtime for LLM/VLM slots: openvino_genai pipelines "
+                        "(genai), optimum-intel python runtime (optimum), or "
+                        "pick per model (auto — optimum only for architectures "
+                        "GenAI can't run: "
+                        f"{', '.join(sorted(NEEDS_OPTIMUM))}).")
     return p.parse_args()
 
 
@@ -3196,15 +3203,53 @@ def main():
         print(f"ERROR: Whisper model directory not found: {args.whisper_dir}")
         sys.exit(1)
 
+    # 4b. Pick the serving backend per model. GenAI pipelines are the default;
+    # NEEDS_OPTIMUM architectures (or --backend optimum) go through the
+    # optimum-intel python runtime instead.
+    def _slot_class(mdir):
+        if args.backend == "genai":
+            return DeviceSlot
+        if args.backend == "optimum":
+            return OptimumSlot
+        return OptimumSlot if needs_optimum(mdir) else DeviceSlot
+
+    primary_cls = _slot_class(model_dir)
+    secondary_cls = _slot_class(args.gpu_model_dir) if args.gpu_model_dir else None
+
+    if OptimumSlot in (primary_cls, secondary_cls):
+        # Fast wrong-venv check (find_spec only — no heavy imports): the
+        # common failure is running from a plain install, and the load-time
+        # error would otherwise arrive minutes later, mid-startup.
+        import importlib.util
+        missing = [m for m in ("optimum", "transformers")
+                   if importlib.util.find_spec(m) is None]
+        if missing:
+            print(f"ERROR: this model needs the optimum-intel backend, but "
+                  f"{'/'.join(missing)} is not installed in this python.")
+            print("Serve from the model-lab venv instead — see README "
+                  "(scripts\\glimmer-export builds it; one-time: "
+                  "pip install flask openvino-genai).")
+            sys.exit(1)
+
+    if primary_cls is OptimumSlot and device == "NPU":
+        if args.device.upper() == "NPU":
+            print("ERROR: this model runs on the optimum-intel backend, which "
+                  "has no NPU path. Use --device GPU or CPU.")
+            sys.exit(1)
+        # AUTO resolved to NPU — re-route to a device the backend can drive.
+        device = "GPU" if "GPU" in devices else "CPU"
+        print(f"  [auto] optimum-backend model — using {device} (NPU has no "
+              f"optimum path)", flush=True)
+
     # 5. Create device slots
-    primary = DeviceSlot(device, _id_of(device))
+    primary = primary_cls(device, _id_of(device))
     all_slots = [primary]
 
     if args.gpu_model_dir:
         if "GPU" not in devices:
             print("WARNING: --gpu-model-dir given but no GPU detected. Ignoring.")
         else:
-            secondary = DeviceSlot("GPU", _id_of("GPU"))
+            secondary = secondary_cls("GPU", _id_of("GPU"))
             all_slots.append(secondary)
 
     if args.whisper_dir:
