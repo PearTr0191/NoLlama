@@ -95,6 +95,27 @@ def is_vlm(model_dir):
         return False
 
 
+# Architectures openvino_genai pipelines cannot run — muse_glimmer's language
+# model takes inputs_embeds (no LLMPipeline path) and VLMPipeline lacks the
+# arch; nemotron_h is hybrid Mamba2+MoE. These are served through
+# optimum-intel's python runtime (OptimumSlot) instead.
+NEEDS_OPTIMUM = {"muse_glimmer", "nemotron_h"}
+
+
+def needs_optimum(model_dir):
+    """True when this model must run on the optimum-intel python backend.
+
+    Reads the *top-level* model_type deliberately (not _text_config): for a
+    VLM-shaped export like Muse Glimmer, the top-level type is the one that
+    names the architecture GenAI would have to support.
+    """
+    try:
+        with open(os.path.join(model_dir, "config.json")) as f:
+            return json.load(f).get("model_type", "").lower() in NEEDS_OPTIMUM
+    except Exception:
+        return False
+
+
 # Suffixes describing the *export* rather than the model, dropped from the
 # display name (and so from the model ID clients configure).
 _NAME_SUFFIXES = ("-ov", "-openvino", "-int8", "-int4")
@@ -490,12 +511,16 @@ def describe_model(model_dir):
         kind = "VLM (vision + text)"
     else:
         kind = "LLM (text)"
+    if needs_optimum(model_dir):
+        kind += ", served text-only via optimum backend"
 
     return {
         "path": os.path.abspath(model_dir),
         "name": name,
         "name_source": why,
         "kind": kind,
+        "backend": "optimum-intel (python runtime)" if needs_optimum(model_dir)
+                   else "openvino_genai",
         "architecture": (cfg.get("architectures") or [None])[0],
         "model_type": cfg.get("model_type"),
         "layers": geo.get("num_hidden_layers"),
@@ -582,6 +607,13 @@ def scan_models(paths):
         if info["model_type"] and info["architecture"]:
             arch += f" / {info['model_type']}"
         print(f"    Architecture   : {arch}")
+        if info["backend"] != "openvino_genai":
+            note = ""
+            import importlib.util
+            if importlib.util.find_spec("optimum") is None:
+                note = ("  — NOT importable in this python; serve from the "
+                        "model-lab venv (see README)")
+            print(f"    Backend        : {info['backend']}{note}")
         print(f"    Weights        : {info['precision']}", end="")
         if info["size_bytes"]:
             print(f"   {info['size_bytes'] / (1 << 30):,.1f} GB on disk")
@@ -1051,6 +1083,8 @@ def parse_tool_calls(text, tools):
 class DeviceSlot:
     """One loaded model on one device."""
 
+    backend = "genai"  # which runtime serves this slot (surfaced in /health)
+
     def __init__(self, device_name, device_id=None):
         self.device_name = device_name   # canonical "NPU", "GPU", "CPU" (display + routing)
         self.device_id = device_id or device_name  # OpenVINO id (may be "GPU.1" on multi-GPU)
@@ -1061,10 +1095,12 @@ class DeviceSlot:
         self.status = "not_configured"   # not_configured -> loading -> warming_up -> ready / error / idle_unloaded
         self.lock = threading.Lock()
         self._cancel = threading.Event()  # signal to stop generation
+        self._stream_error = None        # last stream_tokens backend exception (single consumer per lock)
         self.last_used = time.time()     # for idle-unload watchdog
         self.model_dir = None            # remembered so we can reload after unload
         self.last_ttft_ms = None         # last request's time-to-first-token (prefix-cache hit ≈ low)
         self.prewarmed = False           # did _prewarm_slot succeed for this load
+        self.supports_prefix_cache = True  # GenAI CB backend can prefix-cache; OptimumSlot can't
 
     def load(self, model_dir):
         """Load model, auto-detecting VLM vs LLM."""
@@ -1141,7 +1177,8 @@ class DeviceSlot:
         if not mem or not weights:
             return  # can't estimate — stay quiet rather than guess
         kv_pool = (PROMPT_CACHE_GB * gib
-                   if PROMPT_CACHE and not vlm and self.device_name in ("GPU", "CPU")
+                   if PROMPT_CACHE and not vlm and self.supports_prefix_cache
+                   and self.device_name in ("GPU", "CPU")
                    else 0)
         need = (weights + kv_pool) * 1.1  # ~10% runtime/activation overhead
         if need > mem:
@@ -1255,6 +1292,67 @@ class DeviceSlot:
         """Signal the current generation to stop."""
         self._cancel.set()
 
+    def stream_tokens(self, raw_messages, gen, heartbeat, tag=""):
+        """Low-level token stream — the seam between backend and protocol.
+
+        Yields str (a decoded text chunk) as soon as one exists, or None when
+        `heartbeat` seconds passed with no chunk and the generation worker is
+        still alive (the caller decides: SSE pings, ndjson aborts). Terminates
+        when generation completes, was cancelled, or the worker died.
+
+        Owns: the worker thread, self.lock around generate, clearing _cancel
+        INSIDE the lock (racing the previous request's finally otherwise),
+        last_used, and recording any backend exception in self._stream_error
+        (None on success) before terminating.
+
+        Does NOT touch last_ttft_ms, set _cancel on exit, or emit protocol
+        frames — those belong to the consumers. In particular the
+        client-disconnect safety net (finally: _cancel.set()) MUST stay in the
+        consumers: a generator's finally also runs on normal exhaustion, which
+        would make the consumer's `was_cancelled = _cancel.is_set()` read True
+        on every completed stream.
+        """
+        history = ovg.ChatHistory()
+        for msg in raw_messages:
+            history.append({"role": msg["role"], "content": msg["content"]})
+
+        token_queue = Queue()
+        self._stream_error = None
+
+        def streamer_callback(token):
+            if self._cancel.is_set():
+                return True  # stop generation
+            token_queue.put(token)
+            return False
+
+        def _generate():
+            try:
+                with self.lock:
+                    self._cancel.clear()
+                    self.pipe.generate(history, gen, streamer_callback)
+                    self.last_used = time.time()
+            except Exception as e:
+                self._stream_error = e
+                print(f"{datetime.now():%H:%M:%S} !! [{self.device_name}] "
+                      f"{tag}generate error: {explain_genai_error(e)}", flush=True)
+            finally:
+                token_queue.put(None)
+
+        t = threading.Thread(target=_generate, daemon=True)
+        t.start()
+
+        while True:
+            try:
+                token = token_queue.get(timeout=heartbeat)
+            except Empty:
+                if not t.is_alive():
+                    return  # worker died without the sentinel — defensive
+                yield None  # heartbeat marker
+                continue
+            if token is None:
+                return
+            yield token
+
     def stream_vlm(self, text_prompt, images, gen, completion_id, created, t0):
         """VLM generate — SSE streaming. openvino-genai 2026.1+."""
         token_queue = Queue()
@@ -1346,40 +1444,8 @@ class DeviceSlot:
               flush=True)
 
     def stream_llm(self, raw_messages, gen, completion_id, created, t0):
-        """LLM generate — SSE streaming."""
-        history = ovg.ChatHistory()
-        for msg in raw_messages:
-            history.append({"role": msg["role"], "content": msg["content"]})
-
-        token_queue = Queue()
+        """LLM generate — SSE streaming. Protocol layer over stream_tokens()."""
         token_count = 0
-        cancelled = False
-
-        def streamer_callback(token):
-            if self._cancel.is_set():
-                return True  # stop generation
-            token_queue.put(token)
-            return False
-
-        gen_error = [None]  # captured from generate thread
-
-        def _generate():
-            try:
-                with self.lock:
-                    # Clear inside the lock, just before generation, to avoid
-                    # racing with the previous request's finally: _cancel.set()
-                    self._cancel.clear()
-                    self.pipe.generate(history, gen, streamer_callback)
-                    self.last_used = time.time()
-            except Exception as e:
-                gen_error[0] = e
-                print(f"{datetime.now():%H:%M:%S} !! [{self.device_name}] "
-                      f"generate error: {explain_genai_error(e)}", flush=True)
-            finally:
-                token_queue.put(None)
-
-        t = threading.Thread(target=_generate, daemon=True)
-        t.start()
 
         try:
             chunk = {
@@ -1389,18 +1455,14 @@ class DeviceSlot:
             }
             yield f"data: {json.dumps(chunk)}\n\n"
 
-            while True:
-                try:
-                    token = token_queue.get(timeout=HEARTBEAT_SECS)
-                except Empty:
+            for token in self.stream_tokens(raw_messages, gen, heartbeat=HEARTBEAT_SECS):
+                if token is None:
                     # No token yet — likely a long prefill on a big prompt.
                     # Emit an empty-content delta to keep the client's idle
                     # watchdog from aborting (a real chunk resets content-based
                     # watchdogs, not just byte-based ones; empty string is a
                     # no-op for assembly). The background thread delivers tokens
-                    # or the None sentinel when ready.
-                    if not t.is_alive():
-                        break
+                    # or the sentinel when ready.
                     ka = {
                         "id": completion_id, "object": "chat.completion.chunk",
                         "created": created, "model": self.model_name,
@@ -1409,8 +1471,6 @@ class DeviceSlot:
                     }
                     yield f"data: {json.dumps(ka)}\n\n"
                     continue
-                if token is None:
-                    break
                 if token_count == 0:
                     # Wall-clock TTFT: prefill is over when the first token lands.
                     self.last_ttft_ms = (time.perf_counter() - t0) * 1000
@@ -1424,6 +1484,7 @@ class DeviceSlot:
 
             # Capture state BEFORE the finally-block safety-net sets _cancel
             was_cancelled = self._cancel.is_set()
+            gen_error = [self._stream_error]
             if gen_error[0] is not None:
                 finish_reason = "error"
                 err_chunk = {
@@ -1464,11 +1525,208 @@ class DeviceSlot:
             "type": self.model_type,
             "device": self.device_full,
             "device_name": self.device_name,   # canonical NPU/GPU/CPU (routing/checks)
+            "backend": self.backend,            # genai or optimum runtime
             "tools": _tools_supported(self),    # can this slot drive an agent loop?
             "prewarmed": self.prewarmed,        # did the --prewarm prefill succeed
             "last_ttft_ms": (round(self.last_ttft_ms)
                              if self.last_ttft_ms is not None else None),
         }
+
+
+# ---------------------------------------------------------------------------
+# Optimum-intel slot — python-runtime backend for architectures GenAI can't run
+# ---------------------------------------------------------------------------
+
+_HF_PENALTY_NOTED = [False]
+
+
+def _hf_gen_kwargs(gen):
+    """Translate the routes' ovg.GenerationConfig into transformers generate
+    kwargs. The routes keep building GenAI configs (no churn there); the
+    optimum backend translates at the edge."""
+    kw = dict(max_new_tokens=gen.max_new_tokens, do_sample=bool(gen.do_sample),
+              repetition_penalty=gen.repetition_penalty)
+    if gen.do_sample:
+        # Greedy is do_sample=False alone — the routes' top_k=1 is a GenAI-ism.
+        kw.update(temperature=gen.temperature, top_p=gen.top_p, top_k=int(gen.top_k))
+    if any(getattr(gen, a, 0) for a in ("frequency_penalty", "presence_penalty")):
+        if not _HF_PENALTY_NOTED[0]:
+            print("  [optimum] frequency/presence penalties are not supported by "
+                  "transformers generate — ignored (repetition_penalty still applies)",
+                  flush=True)
+            _HF_PENALTY_NOTED[0] = True
+    return kw
+
+
+class OptimumSlot(DeviceSlot):
+    """One model served through optimum-intel's python runtime instead of an
+    openvino_genai pipeline — for the NEEDS_OPTIMUM architectures GenAI can't
+    run: muse_glimmer's language model takes inputs_embeds (no LLMPipeline
+    path, and VLMPipeline lacks the arch); nemotron_h is hybrid Mamba2+MoE.
+
+    TEXT-ONLY for now: model_type reports "llm" even for a VLM-shaped export
+    like Muse Glimmer, so the routes reject images with a clean 400 and hand
+    us role-structured messages (the VLM paths flatten roles away). No prefix
+    cache (that's a GenAI CB-scheduler feature) — prewarm and the KV-pool
+    preflight are gated off via supports_prefix_cache.
+    """
+
+    backend = "optimum"
+
+    def __init__(self, device_name, device_id=None):
+        super().__init__(device_name, device_id)
+        self.supports_prefix_cache = False
+        self.model = None
+        self.tokenizer = None
+
+    def _lazy_import(self):
+        """Import the heavy stack at load time (soundfile pattern): plain
+        installs don't carry optimum/transformers, and GenAI-only serving
+        must not pay the torch import."""
+        try:
+            import transformers  # noqa: F401
+            import optimum.intel  # noqa: F401
+        except ImportError as e:
+            raise RuntimeError(
+                f"{self.model_name} needs the optimum-intel python backend, "
+                f"but it is not installed in this python ({e}). Serve from the "
+                f"model-lab venv instead (see README: scripts/glimmer-export "
+                f"builds it; one-time 'pip install flask openvino-genai')."
+            )
+        # transformers 5.16-dev materializes checkpoint shards in a 4-worker
+        # thread pool with no env knob; parallel mmap copies die with a native
+        # access violation (0xC0000005) on 32 GB machines. Serialize — same
+        # workaround as scripts/glimmer-export/run-export.py.
+        import transformers.core_model_loading as _cml
+        _cml.GLOBAL_WORKERS = 1
+
+    def load(self, model_dir):
+        self.status = "loading"
+        self.model_dir = model_dir
+        self.model_name = model_display_name(model_dir)
+        self.model_type = "llm"  # text-only phase, even when the export is VLM-shaped
+        print(f"  [{self.device_name}] Detected: LLM ({self.model_name}, "
+              f"optimum backend)")
+        integrity_err = _verify_weights_integrity(model_dir)
+        if integrity_err:
+            raise RuntimeError(integrity_err)
+        self._preflight_memory(vlm=False)
+        self._lazy_import()
+        print(f"  [{self.device_name}] Loading (optimum-intel runtime)...",
+              flush=True)
+        from optimum.intel import OVModelForCausalLM, OVModelForVisualCausalLM
+        from transformers import AutoTokenizer
+        # Structural pick: a VLM-shaped export (Glimmer) must go through the
+        # visual class even for text-only generate; nemotron_h is a plain LM.
+        cls = OVModelForVisualCausalLM if is_vlm(model_dir) else OVModelForCausalLM
+        try:
+            self.model = cls.from_pretrained(model_dir, device=self.device_id)
+        except KeyError as e:
+            raise RuntimeError(
+                f"transformers {__import__('transformers').__version__} does not "
+                f"know this architecture ({e}) — the model-lab venv carries "
+                f"transformers from git main, which does.")
+        self.tokenizer = AutoTokenizer.from_pretrained(model_dir)
+        self.pipe = self.model  # inherited ensure_loaded/unload key on .pipe
+
+    def _stopping_criteria(self):
+        from transformers import StoppingCriteria, StoppingCriteriaList
+
+        slot = self
+
+        class _CancelStop(StoppingCriteria):
+            def __call__(self, input_ids, scores, **kwargs):
+                return slot._cancel.is_set()
+
+        return StoppingCriteriaList([_CancelStop()])
+
+    def _generate_unlocked(self, raw_messages, hf_kwargs, streamer=None):
+        """The bare generate call, no locking — exists because ensure_loaded()
+        calls warmup() while HOLDING self.lock (non-reentrant), mirroring how
+        DeviceSlot.warmup talks to the pipeline directly."""
+        inputs = self.tokenizer.apply_chat_template(
+            raw_messages, add_generation_prompt=True,
+            return_tensors="pt", return_dict=True)
+        self.model.generate(
+            **inputs, streamer=streamer,
+            stopping_criteria=self._stopping_criteria(),
+            pad_token_id=self.tokenizer.eos_token_id, **hf_kwargs)
+
+    def warmup(self):
+        self.status = "warming_up"
+        print(f"  [{self.device_name}] Warmup...", flush=True)
+        t0 = time.perf_counter()
+        self._generate_unlocked([{"role": "user", "content": "Hi"}],
+                                dict(max_new_tokens=5, do_sample=False))
+        print(f"  [{self.device_name}] Warmup done "
+              f"({time.perf_counter() - t0:.1f}s)", flush=True)
+        self.status = "ready"
+        self.last_used = time.time()
+
+    def stream_tokens(self, raw_messages, gen, heartbeat, tag=""):
+        """Same contract as DeviceSlot.stream_tokens, over TextIteratorStreamer."""
+        from transformers import TextIteratorStreamer
+
+        streamer = TextIteratorStreamer(
+            self.tokenizer, skip_prompt=True, skip_special_tokens=True,
+            timeout=heartbeat)  # None → block forever (non-stream join)
+        self._stream_error = None
+
+        def _generate():
+            try:
+                with self.lock:
+                    self._cancel.clear()
+                    self._generate_unlocked(raw_messages, _hf_gen_kwargs(gen),
+                                            streamer=streamer)
+                    self.last_used = time.time()
+            except Exception as e:
+                self._stream_error = e
+                print(f"{datetime.now():%H:%M:%S} !! [{self.device_name}] "
+                      f"{tag}generate error: {e}", flush=True)
+                streamer.end()  # unblock the consumer even on pre-generate failure
+
+        t = threading.Thread(target=_generate, daemon=True)
+        t.start()
+
+        it = iter(streamer)
+        while True:
+            try:
+                chunk = next(it)
+            except Empty:  # TextIteratorStreamer raises queue.Empty on timeout
+                if not t.is_alive():
+                    return
+                yield None  # heartbeat marker
+                continue
+            except StopIteration:
+                return
+            if chunk:
+                yield chunk
+
+    def generate_llm(self, raw_messages, gen):
+        """Non-streaming = joined stream: one code path, wall-clock TTFT
+        (extract_perf has nothing to read on this backend)."""
+        t0 = time.perf_counter()
+        chunks = []
+        for chunk in self.stream_tokens(raw_messages, gen, heartbeat=None):
+            if not chunks:
+                self.last_ttft_ms = (time.perf_counter() - t0) * 1000
+            chunks.append(chunk)
+        if self._stream_error is not None:
+            raise self._stream_error
+        return "".join(chunks).strip()
+
+    def generate_vlm(self, text_prompt, images, gen):
+        raise RuntimeError("vision path not enabled on the optimum backend yet")
+
+    def stream_vlm(self, text_prompt, images, gen, completion_id, created, t0):
+        raise RuntimeError("vision path not enabled on the optimum backend yet")
+
+    def unload(self):
+        if self.pipe is None:
+            return
+        self.model = None
+        self.tokenizer = None
+        super().unload()
 
 
 # ---------------------------------------------------------------------------
@@ -1819,7 +2077,10 @@ def _prewarm_slot(slot):
     cache hit. Only meaningful on a GPU/CPU LLM slot with prefix caching on.
     """
     if not (PREWARM_FILE and PROMPT_CACHE and slot.model_type == "llm"
-            and slot.device_name in ("GPU", "CPU")):
+            and slot.device_name in ("GPU", "CPU")
+            and getattr(slot, "supports_prefix_cache", False)):
+        # OptimumSlot has no prefix cache — a prewarm prefill would burn a
+        # full 30B-scale prefill at startup for nothing.
         return
     if not os.path.isfile(PREWARM_FILE):
         return
@@ -2399,41 +2660,14 @@ def ollama_chat():
 
 
 def _ollama_stream_chat(slot, raw_messages, gen, t0):
-    """Ollama streaming: newline-delimited JSON (not SSE)."""
-    history = ovg.ChatHistory()
-    for msg in raw_messages:
-        history.append({"role": msg["role"], "content": msg["content"]})
-
-    token_queue = Queue()
+    """Ollama streaming: newline-delimited JSON (not SSE). Protocol layer over
+    slot.stream_tokens() — a None marker after 120 s of silence aborts the
+    stream, preserving this path's historical no-token timeout."""
     token_count = 0
 
-    def streamer_callback(token):
-        if slot._cancel.is_set():
-            return True
-        token_queue.put(token)
-        return False
-
-    def _generate():
-        try:
-            with slot.lock:
-                slot._cancel.clear()
-                slot.pipe.generate(history, gen, streamer_callback)
-                slot.last_used = time.time()
-        except Exception as e:
-            print(f"{datetime.now():%H:%M:%S} !! [{slot.device_name}] [Ollama] "
-                  f"generate error: {explain_genai_error(e)}", flush=True)
-        finally:
-            token_queue.put(None)
-
-    t = threading.Thread(target=_generate, daemon=True)
-    t.start()
-
     try:
-        while True:
-            try:
-                token = token_queue.get(timeout=120)
-            except Empty:
-                break
+        for token in slot.stream_tokens(raw_messages, gen, heartbeat=120,
+                                        tag="[Ollama] "):
             if token is None:
                 break
             if token_count == 0:
@@ -2559,41 +2793,13 @@ def ollama_generate():
 
 
 def _ollama_stream_generate(slot, raw_messages, gen, t0):
-    """Ollama /api/generate streaming."""
-    history = ovg.ChatHistory()
-    for msg in raw_messages:
-        history.append({"role": msg["role"], "content": msg["content"]})
-
-    token_queue = Queue()
+    """Ollama /api/generate streaming. Protocol layer over slot.stream_tokens();
+    None after 120 s of silence aborts (historical behavior, no TTFT here)."""
     token_count = 0
 
-    def streamer_callback(token):
-        if slot._cancel.is_set():
-            return True
-        token_queue.put(token)
-        return False
-
-    def _generate():
-        try:
-            with slot.lock:
-                slot._cancel.clear()
-                slot.pipe.generate(history, gen, streamer_callback)
-                slot.last_used = time.time()
-        except Exception as e:
-            print(f"{datetime.now():%H:%M:%S} !! [{slot.device_name}] [Ollama] "
-                  f"generate error: {explain_genai_error(e)}", flush=True)
-        finally:
-            token_queue.put(None)
-
-    t = threading.Thread(target=_generate, daemon=True)
-    t.start()
-
     try:
-        while True:
-            try:
-                token = token_queue.get(timeout=120)
-            except Empty:
-                break
+        for token in slot.stream_tokens(raw_messages, gen, heartbeat=120,
+                                        tag="[Ollama] "):
             if token is None:
                 break
             token_count += 1
@@ -2745,6 +2951,9 @@ def _idle_watchdog(slots, idle_timeout, check_interval=30):
         now = time.time()
         for slot in slots:
             if not slot or slot.status != "ready":
+                continue
+            # WhisperSlot has no last_used/unload — never idle-unloaded
+            if getattr(slot, "last_used", None) is None:
                 continue
             if now - slot.last_used < idle_timeout:
                 continue
