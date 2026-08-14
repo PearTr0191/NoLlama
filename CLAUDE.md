@@ -9,11 +9,16 @@ OpenAI-compatible LLM/VLM server for Intel hardware. NPU-first.
 - GPU: VLMPipeline (images) or LLMPipeline (text). Both stream as of openvino-genai 2026.1 — verified on Arc 140V iGPU.
 - Prefix (KV) caching: **default on** for GPU/CPU **LLM** slots — they load via the
   continuous-batching backend (`LLMPipeline(..., scheduler_config=SchedulerConfig(
-  enable_prefix_caching=True, cache_size=PROMPT_CACHE_GB))`). A repeated prompt prefix (an
+  enable_prefix_caching=True, cache_size=slot.kv_pool_gb))`). A repeated prompt prefix (an
   agent's fixed system prompt + tool schemas, identical every turn) is prefilled once, not
   every turn — measured ~47× faster on a cached turn (24.4s→0.5s for a ~2k-token prefix on
   the 285K CPU). Auto-invalidated by any prefix change (no staleness). `--no-prompt-cache`
-  disables it; `--cache-size-gb N` sizes the pool (default 2). NPU and VLM slots keep the
+  disables it. The pool is **auto-sized per slot** (`_resolve_kv_pool`): a third of what the
+  weights leave free in the device budget, floor 2 GB (`AUTO_KV_MIN_GB`), cap ~64k tokens of
+  the model's KV geometry (`AUTO_KV_TOKENS`) — sized from the *total* budget (not free RAM)
+  so it's stable across restarts/reloads; the CB backend grows into it rather than
+  allocating upfront, but prefix-cached blocks are never released, hence the fraction.
+  `--cache-size-gb N` pins it (skips auto). NPU and VLM slots keep the
   plain pipeline (NPU has no CB path; it keeps MAX_PROMPT_LEN). Falls back to the plain
   pipeline with a warning if a device can't build the CB backend. `--prewarm <file>`
   prefills a saved agent prompt at startup (the file auto-captures the first big prompt
@@ -27,8 +32,9 @@ OpenAI-compatible LLM/VLM server for Intel hardware. NPU-first.
 - Observability: per-request log lines include TTFT (streaming: wall-clock to first token;
   non-streaming: `perf_metrics` via `extract_perf`) — a prefix-cache hit is sub-second vs a
   cold multi-second/minute prefill, so hits/misses are visible without instrumentation.
-  `/health` has `prompt_cache_info` (pool size, prewarm file) + per-slot `last_ttft_ms` and
-  `prewarmed`; `prompt_cache` stays a bare bool (start-openclaw.ps1 truth-tests it).
+  `/health` has `prompt_cache_info` (pinned `pool_gb` or null + `auto`, prewarm file) +
+  per-slot `kv_pool_gb` (resolved size), `last_ttft_ms` and `prewarmed`; `prompt_cache`
+  stays a bare bool (start-openclaw.ps1 truth-tests it).
 - Memory preflight at load (`_preflight_memory`): warns (never blocks) when weights + KV
   pool exceed the device budget (GPU: `GPU_DEVICE_TOTAL_MEM_SIZE`, which reflects Windows'
   ~half-RAM iGPU policy and Intel's "Shared GPU Memory Override" driver setting; CPU: total

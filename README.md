@@ -566,8 +566,11 @@ python nollama.py --vscode-compat
 
 # Prefix (KV) caching is ON by default for GPU/CPU LLM slots — a repeated prompt
 # prefix is prefilled once, not every turn (big win for agent loops, ~47x on a
-# cached turn). Tune the pool size, or disable it:
-python nollama.py --cache-size-gb 4     # larger KV-cache pool (default 2 GB)
+# cached turn). The pool is auto-sized per device from its memory budget and
+# the model's KV geometry (a third of what the weights leave free, floor 2 GB,
+# cap ~64k tokens' worth) — the startup log shows the chosen size and its
+# token capacity. Pin the size, or disable caching:
+python nollama.py --cache-size-gb 4     # pin the KV-cache pool (skips auto-sizing)
 python nollama.py --no-prompt-cache     # disable prefix caching
 
 # Pre-warm the cache at startup so the FIRST agent turn is fast too (not just
@@ -612,21 +615,26 @@ from a bad model.
 shows and what clients request as the model ID. There's deliberately no
 `--model-name` flag — see `TODONT.md`.
 
-**Size the KV pool for your model.** The pool must hold the whole
-conversation: bytes-per-token scale with the model's layer/head geometry
-(~56 KB/token for a 7B coder, ~96 KB/token for Qwen3-Coder-30B — the
-default 2 GB is ~37k and ~21k tokens respectively). Too small doesn't just
+**The KV pool sizes itself.** The pool must hold the whole conversation:
+bytes-per-token scale with the model's layer/head geometry (~56 KB/token
+for a 7B coder, ~96 KB/token for Qwen3-Coder-30B). Too small doesn't just
 evict cache — generation on a big agent prompt **fails outright**
-(`Got unfinished GenerationStatus`, see issue #21); with a 30B-class model
-start at `--cache-size-gb 8` and go up. NoLlama now does the math for you
-at startup: it logs the pool's token capacity for the loaded model, warns
-when agent prompts would exhaust it, and warns when model + pool exceed
-the device's memory budget entirely. On Core Ultra iGPUs that budget is
-~half of system RAM by default — raise it with Intel Graphics Software's
-"Shared GPU Memory Override" (driver 101.6987+). Per-request log lines
-include TTFT, so a prefix-cache hit (sub-second) vs a cold prefill
-(seconds-to-minutes) is visible directly; `/health` reports the cache
-config and each slot's last TTFT.
+(`Got unfinished GenerationStatus`, see issue #21). So NoLlama sizes the
+pool per device at load: a third of what the weights leave free in the
+device's memory budget, floored at 2 GB and capped at ~64k tokens of the
+model's geometry (enough for a big agent system prompt plus a long
+session). It's a ceiling the cache grows into, not an upfront allocation
+— and the fraction leaves RAM for the compilers and tests an agent runs
+on the same machine. The startup log shows the chosen size and its token
+capacity; `--cache-size-gb N` pins it when you know better (e.g. whole-book
+contexts). The preflight still warns when agent prompts would exhaust the
+pool, and when model + pool exceed the device budget entirely. On Core
+Ultra iGPUs that budget is ~half of system RAM by default — raise it with
+Intel Graphics Software's "Shared GPU Memory Override" (driver 101.6987+).
+Per-request log lines include TTFT, so a prefix-cache hit (sub-second) vs
+a cold prefill (seconds-to-minutes) is visible directly; `/health` reports
+the cache config (`prompt_cache_info.auto`, per-slot `kv_pool_gb`) and
+each slot's last TTFT.
 
 ### Idle unload
 

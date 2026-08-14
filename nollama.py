@@ -712,14 +712,17 @@ def extract_perf(result):
         return None, None
 
 
-def explain_genai_error(e):
-    """Map opaque OpenVINO GenAI runtime errors to actionable messages."""
+def explain_genai_error(e, slot=None):
+    """Map opaque OpenVINO GenAI runtime errors to actionable messages.
+    Pass the serving slot when available — some hints cite its config."""
     msg = str(e)
     if "unfinished GenerationStatus" in msg:
         # Continuous-batching scheduler couldn't fit the sequence in the KV
         # pool (seen with 30B-class models + big agent prompts, issue #21).
+        pool = getattr(slot, "kv_pool_gb", 0) or PROMPT_CACHE_GB
+        cur = f" (currently {pool} GB)" if pool else ""
         return (f"{msg} — likely the KV-cache pool is too small for this "
-                f"prompt: raise --cache-size-gb (currently {PROMPT_CACHE_GB} GB)")
+                f"prompt: raise --cache-size-gb{cur}")
     if "dynamic shape" in msg and "[GPU]" in msg:
         # GPU plugin limitation, not a loading conflict: some optimum-exported
         # graphs (e.g. Muse Glimmer's inputs_embeds LM) keep shapes dynamic in
@@ -1162,6 +1165,7 @@ class DeviceSlot:
         self.last_ttft_ms = None         # last request's time-to-first-token (prefix-cache hit ≈ low)
         self.prewarmed = False           # did _prewarm_slot succeed for this load
         self.supports_prefix_cache = True  # GenAI CB backend can prefix-cache; OptimumSlot can't
+        self.kv_pool_gb = 0              # resolved KV pool for THIS slot (_resolve_kv_pool)
 
     def load(self, model_dir):
         """Load model, auto-detecting VLM vs LLM."""
@@ -1175,6 +1179,7 @@ class DeviceSlot:
         integrity_err = _verify_weights_integrity(model_dir)
         if integrity_err:
             raise RuntimeError(integrity_err)
+        self._resolve_kv_pool(vlm)
         self._preflight_memory(vlm)
         print(f"  [{self.device_name}] Loading...", flush=True)
 
@@ -1209,13 +1214,15 @@ class DeviceSlot:
                 try:
                     sc = ovg.SchedulerConfig()
                     sc.enable_prefix_caching = True
-                    sc.cache_size = PROMPT_CACHE_GB
+                    sc.cache_size = self.kv_pool_gb
                     self.pipe = ovg.LLMPipeline(
                         str(model_dir), device=self.device_id, scheduler_config=sc,
                         **offload,
                     )
+                    src = "" if PROMPT_CACHE_GB is not None else \
+                        ", auto-sized — pin with --cache-size-gb"
                     print(f"  [{self.device_name}] prefix caching on "
-                          f"({PROMPT_CACHE_GB} GB KV pool)", flush=True)
+                          f"({self.kv_pool_gb} GB KV pool{src})", flush=True)
                 except Exception as e:
                     print(f"  [{self.device_name}] prefix caching unavailable "
                           f"({e}); using plain pipeline", flush=True)
@@ -1224,6 +1231,39 @@ class DeviceSlot:
             else:
                 self.pipe = ovg.LLMPipeline(str(model_dir), device=self.device_id,
                                             **offload)
+
+    def _resolve_kv_pool(self, vlm):
+        """Set self.kv_pool_gb — the KV-cache pool for this slot's CB backend.
+
+        An explicit --cache-size-gb pins it. Otherwise auto-size from the
+        device budget: a third of what's left after weights, floored at the
+        old 2 GB default and capped at AUTO_KV_TOKENS of this model's KV
+        geometry. Sized from the *total* budget, not free memory, so the
+        result is stable across restarts and idle-unload reloads. The CB
+        backend grows into the pool rather than allocating it upfront, but
+        with prefix caching on, blocks are never released — a long agent
+        session eventually owns the whole pool, hence the headroom fraction
+        (see AUTO_KV_HEADROOM_SHARE).
+        """
+        if not (PROMPT_CACHE and not vlm and self.supports_prefix_cache
+                and self.device_name in ("GPU", "CPU")):
+            self.kv_pool_gb = 0
+            return
+        if PROMPT_CACHE_GB is not None:
+            self.kv_pool_gb = PROMPT_CACHE_GB
+            return
+        gib = 2 ** 30
+        mem = _device_mem_bytes(self.device_name, self.device_id)
+        weights = _dir_size_bytes(self.model_dir)
+        if not mem or not weights:
+            self.kv_pool_gb = AUTO_KV_MIN_GB  # can't estimate — old default
+            return
+        headroom = mem - weights * 1.1  # same overhead margin as the preflight
+        pool = headroom / AUTO_KV_HEADROOM_SHARE / gib
+        per_tok = _kv_bytes_per_token(self.model_dir)
+        if per_tok:
+            pool = min(pool, AUTO_KV_TOKENS * per_tok / gib)
+        self.kv_pool_gb = max(AUTO_KV_MIN_GB, int(pool))
 
     def _preflight_memory(self, vlm):
         """Sanity-check model weights + KV pool against the device's memory
@@ -1237,10 +1277,7 @@ class DeviceSlot:
         weights = _dir_size_bytes(self.model_dir)
         if not mem or not weights:
             return  # can't estimate — stay quiet rather than guess
-        kv_pool = (PROMPT_CACHE_GB * gib
-                   if PROMPT_CACHE and not vlm and self.supports_prefix_cache
-                   and self.device_name in ("GPU", "CPU")
-                   else 0)
+        kv_pool = self.kv_pool_gb * gib  # 0 when this slot can't prefix-cache
         need = (weights + kv_pool) * 1.1  # ~10% runtime/activation overhead
         if need > mem:
             if OFFLOAD_RATIO and self.device_name == "GPU":
@@ -1268,7 +1305,7 @@ class DeviceSlot:
             per_tok = _kv_bytes_per_token(self.model_dir)
             if per_tok:
                 capacity = kv_pool // per_tok
-                line = (f"  [{self.device_name}] KV pool {PROMPT_CACHE_GB} GB ~ "
+                line = (f"  [{self.device_name}] KV pool {self.kv_pool_gb} GB ~ "
                         f"{capacity // 1000}k tokens for this model "
                         f"({per_tok // 1024} KB/token)")
                 if capacity < 32768:
@@ -1395,7 +1432,7 @@ class DeviceSlot:
             except Exception as e:
                 self._stream_error = e
                 print(f"{datetime.now():%H:%M:%S} !! [{self.device_name}] "
-                      f"{tag}generate error: {explain_genai_error(e)}", flush=True)
+                      f"{tag}generate error: {explain_genai_error(e, self)}", flush=True)
             finally:
                 token_queue.put(None)
 
@@ -1552,7 +1589,7 @@ class DeviceSlot:
                     "id": completion_id, "object": "chat.completion.chunk",
                     "created": created, "model": self.model_name,
                     "choices": [{"index": 0, "delta": {
-                        "content": f"\n[error: {explain_genai_error(gen_error[0])}]"
+                        "content": f"\n[error: {explain_genai_error(gen_error[0], self)}]"
                     }, "finish_reason": "error"}],
                 }
                 yield f"data: {json.dumps(err_chunk)}\n\n"
@@ -1589,6 +1626,7 @@ class DeviceSlot:
             "backend": self.backend,            # genai or optimum runtime
             "tools": _tools_supported(self),    # can this slot drive an agent loop?
             "prewarmed": self.prewarmed,        # did the --prewarm prefill succeed
+            "kv_pool_gb": self.kv_pool_gb or None,  # resolved KV pool (null: no prefix cache)
             "last_ttft_ms": (round(self.last_ttft_ms)
                              if self.last_ttft_ms is not None else None),
         }
@@ -2022,7 +2060,15 @@ def apply_penalties(gen, repetition=None, frequency=None, presence=None):
             except Exception:
                 pass
 PROMPT_CACHE = True   # prefix-KV caching on GPU/CPU LLM slots (set False via --no-prompt-cache)
-PROMPT_CACHE_GB = 2   # KV-cache pool size (GB) when prefix caching is on
+PROMPT_CACHE_GB = None  # KV pool GB pinned via --cache-size-gb; None = auto-size per slot at load
+AUTO_KV_MIN_GB = 2    # auto-size floor — the old fixed default; also the fallback when the
+                      # device budget or model geometry can't be read
+AUTO_KV_TOKENS = 65536  # auto-size cap, in tokens of the model's KV geometry: covers an
+                        # agent's ~21k-token system prompt plus a long session; beyond that
+                        # the pool is waste
+AUTO_KV_HEADROOM_SHARE = 3  # auto takes at most 1/(this) of what's left after weights —
+                            # iGPU "device memory" and the CPU pool are the same RAM the
+                            # agent's own compilers and tests run in
 OFFLOAD_RATIO = 0     # % of MoE expert weights streamed from disk on GPU (--offload-ratio).
                       # Needs an XMX-capable GPU (Arc/Lunar Lake+) — silent no-op without.
                       # Measured on Arc 140V: 30B-A3B int4 runs in 2.35 GB resident at 90.
@@ -2139,7 +2185,7 @@ def _sse_tool_stream(slot, raw_messages, gen, tools, completion_id, created, t0)
 
     elapsed = time.perf_counter() - t0
     if result.get("error") is not None:
-        err = explain_genai_error(result["error"])
+        err = explain_genai_error(result["error"], slot)
         print(f"{datetime.now():%H:%M:%S} !! [{slot.device_name}] "
               f"LLM error: {err}", flush=True)
         yield ("data: " + json.dumps({
@@ -2289,7 +2335,7 @@ def _prewarm_slot(slot):
               flush=True)
     except Exception as e:
         slot.prewarmed = False
-        print(f"  [{slot.device_name}] pre-warm failed: {explain_genai_error(e)}", flush=True)
+        print(f"  [{slot.device_name}] pre-warm failed: {explain_genai_error(e, slot)}", flush=True)
 
 
 # ---------------------------------------------------------------------------
@@ -2341,7 +2387,10 @@ def health():
               "prompt_cache": PROMPT_CACHE,
               "prompt_cache_info": {
                   "enabled": PROMPT_CACHE,
+                  # pinned --cache-size-gb value; null = auto-sized (the
+                  # resolved size is per-slot: devices[*].kv_pool_gb)
                   "pool_gb": PROMPT_CACHE_GB,
+                  "auto": PROMPT_CACHE_GB is None,
                   "prewarm_file": PREWARM_FILE,
               }}
     if whisper_slot and whisper_slot.status != "not_configured":
@@ -2570,7 +2619,7 @@ def chat_completions():
     try:
         text = slot.generate_llm(raw_messages, gen)
     except Exception as e:
-        err = explain_genai_error(e)
+        err = explain_genai_error(e, slot)
         print(f"{datetime.now():%H:%M:%S} !! [{slot.device_name}] LLM error: {err}", flush=True)
         return openai_error(f"Inference failed: {err}", "server_error", 500)
 
@@ -2808,7 +2857,7 @@ def ollama_chat():
     try:
         text = slot.generate_llm(raw_messages, gen)
     except Exception as e:
-        return jsonify({"error": explain_genai_error(e)}), 500
+        return jsonify({"error": explain_genai_error(e, slot)}), 500
 
     elapsed = time.perf_counter() - t0
     ttft = (f", TTFT {slot.last_ttft_ms:.0f}ms"
@@ -3166,7 +3215,7 @@ def _load_in_background(slot, model_dir, devices, port, ollama_port, banner_slot
         _prewarm_slot(slot)
     except Exception as e:
         slot.status = "error"
-        print(f"\n  [{slot.device_name}] ERROR: Failed to load model: {explain_genai_error(e)}")
+        print(f"\n  [{slot.device_name}] ERROR: Failed to load model: {explain_genai_error(e, slot)}")
         if not any(s in str(e) for s in ("Could not find a model", "is truncated",
                                          "Compilation failed", "dynamic shape")):
             # Device-contention hint only where it's plausible — for a
@@ -3251,9 +3300,13 @@ def parse_args():
                    help="Disable prefix (KV) caching on GPU/CPU LLM slots. Caching is "
                         "ON by default — it prefills a repeated prompt prefix (e.g. an "
                         "agent's fixed system prompt) once instead of every turn.")
-    p.add_argument("--cache-size-gb", type=int, default=PROMPT_CACHE_GB,
-                   help=f"KV-cache pool size in GB when prefix caching is on "
-                        f"(default: {PROMPT_CACHE_GB})")
+    p.add_argument("--cache-size-gb", type=int, default=None,
+                   help=f"KV-cache pool size in GB when prefix caching is on. "
+                        f"Default: auto — sized per device from its memory "
+                        f"budget and the model's KV geometry (a third of what "
+                        f"weights leave free, floor {AUTO_KV_MIN_GB} GB, cap "
+                        f"~{AUTO_KV_TOKENS // 1024}k tokens). Pass a number "
+                        f"to pin it.")
     p.add_argument("--prewarm", default=None, metavar="FILE",
                    help="Prefill a saved agent prompt at startup so the first turn is a "
                         "cache hit (no cold-prefill stall). The file auto-populates from the "
