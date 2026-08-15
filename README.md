@@ -295,6 +295,13 @@ three-file vision export); only the wheels do.
 .\start.ps1                # generated pointing at venv-nightly
 ```
 
+On a fresh Windows box that has neither PowerShell 7 nor a relaxed
+execution policy, go through the shim instead — it forwards its arguments:
+
+```bat
+install-windows.bat -Nightly
+```
+
 `-Nightly` never touches your stable `venv/`. It builds a second, complete
 runtime in `venv-nightly/` and bakes `-VenvName venv-nightly` into the
 generated `start.ps1`, so a machine can hold both and launch either. The
