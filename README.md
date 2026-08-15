@@ -69,6 +69,8 @@ because LLM decode streams the whole model per token.
 
 ᵃ Core Ultra 9 **285K** desktop — DDR5-6400 (~100 GB/s), 4-core Xe-LPG iGPU, NPU 3.
 ᵇ AMD Ryzen 9 **5950X** — DDR4 (~50 GB/s). Unsupported-but-measured; see below.
+Since 2026-08-15 this box also carries an **Arc Pro B60 24 GB**, so the *wanted*
+Arc dGPU cells and the DDR4 CPU cells will come from the same machine.
 ᶜ Core Ultra 7 **258V** laptop — Arc 140V iGPU on LPDDR5X-8533 (~136 GB/s).
 † 285K CPU at *whole-novel context* (~6 tok/s) — KV reads eat bandwidth at that
 scale; no clean short-context CPU number for the MoE yet.
@@ -196,6 +198,14 @@ territory. **Requires an XMX-capable GPU** (Arc, Lunar Lake and newer —
 `install.ps1` tells you at device detection); on iGPUs without XMX the
 feature silently does nothing, and NoLlama warns at startup instead of
 letting you believe your model got smaller.
+
+Confirmed XMX (`GPU_HW_MATMUL` in `OPTIMIZATION_CAPABILITIES`) so far:
+**Arc 140V** iGPU (Lunar Lake) and **Arc Pro B60** discrete (Battlemage,
+checked 2026-08-15 — capability only, no throughput measured yet). The
+desktop Xe-LPG iGPU (Arrow Lake) does **not** have it. Note the capability
+flag is necessary but not sufficient: it says the offload path will engage,
+not that a given model fits or performs — and it does nothing at all for
+dense models, which have no experts to stream.
 
 ### Where does your hardware land? (big-MoE routes, measured 2026-08)
 
@@ -369,7 +379,7 @@ Features:
 |---|---|---|---|
 | NPU (Intel AI Boost) | Core Ultra 7 258V | Text chat via LLMPipeline. Low power, sustained workload sweet spot. | Yes |
 | ARC iGPU | ARC 140V (Core Ultra) | Vision + text, or bigger LLM | Yes (VLM streams in 2026.1+) |
-| ARC discrete | A770, B580 | Same as iGPU, more VRAM for larger models | Yes (VLM streams in 2026.1+) |
+| ARC discrete | A770, B580, Pro B60 24 GB | Same as iGPU, more VRAM for larger models. B60 detects as `(dGPU)` with XMX — see [disk offload](#big-moe-models-on-small-gpus-disk-offload) | Yes (VLM streams in 2026.1+) |
 | CPU | Any x86-64 with AVX2 — Intel supported, **AMD works too** (measured: Ryzen 9 5950X on DDR4, 23 tok/s on a 3B) | Fallback for everything. On desktops with DDR5 and many cores, often *faster* than NPU — see benchmarks. Decode is memory-bandwidth-bound: DDR4 boxes should size models accordingly. | Yes |
 
 ### Intel only — by design
