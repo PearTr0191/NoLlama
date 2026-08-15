@@ -43,10 +43,25 @@ param(
     # corruption?" (TODONT: re-run the comprehension test on each release)
     # without destroying the runtime that produced the previous verdict.
     [switch]$Nightly,
-    [string]$NightlyIndex = 'https://storage.openvinotoolkit.org/simple/wheels/nightly'
+    [string]$NightlyIndex = 'https://storage.openvinotoolkit.org/simple/wheels/nightly',
+    # Catch-all. 'pwsh -File script.ps1 -Unknown' does NOT error — it binds
+    # what it recognises, silently drops the rest, and runs the body with
+    # exit 0. Passing -Nightly to a checkout that predates it therefore
+    # looked like success while building the release venv (2026-08-15).
+    # Same guard as download-model.ps1 (#19).
+    [Parameter(ValueFromRemainingArguments = $true)]
+    [string[]]$ExtraArgs
 )
 
 $ErrorActionPreference = 'Stop'
+
+if ($ExtraArgs) {
+    Write-Host "ERROR: unrecognized argument(s): $($ExtraArgs -join ', ')" -ForegroundColor Red
+    Write-Host '  Flags: -Nightly -Python <exe> -VenvDir <dir> -TransformersRef <ref> -OptimumIntelRef <ref>' -ForegroundColor Yellow
+    Write-Host '  If you expected one of these to exist, check you are on a branch that has it:' -ForegroundColor Yellow
+    Write-Host '    git branch --show-current' -ForegroundColor Yellow
+    exit 1
+}
 
 if (-not $VenvDir) {
     # Join-Path, not "\": a literal backslash lands in the Linux path
