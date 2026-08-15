@@ -88,6 +88,26 @@ results = {}
 for device in ("GPU", "CPU"):
     print(f"--- loading on {device} ---", flush=True)
     model = OVModel.from_pretrained(MODEL, device=device)
+
+    # transformers main (5.16.0.dev0, 2026-08) calls get_experts_implementation()
+    # from _optimize_model_for_decode() on every _sample() pass, and
+    # OVModelForCausalLM does not implement it — so the TEXT-ONLY optimum path
+    # is broken against current transformers main. OVModelForVisualCausalLM has
+    # its own generate() and is unaffected, which is why Glimmer (a VLM-shaped
+    # export) runs fine in the same venv.
+    #
+    # The hook toggles a MoE expert kernel; both models here are dense, so
+    # no-oping it should not change the numbers we are measuring. Announced
+    # loudly rather than applied silently — this is a measurement script and a
+    # silent patch is exactly what you must not do to a measurement.
+    if not hasattr(model, "get_experts_implementation"):
+        print("    [shim] transformers wants get_experts_implementation(); "
+              "OVModelForCausalLM has none.")
+        print("    [shim] no-oping it. Valid for DENSE models only — if this "
+              "model is MoE, stop and read the comment.")
+        model.get_experts_implementation = lambda: None
+        model.set_experts_implementation = lambda impl: None
+
     runs = []
     # Twice on the same load: proves generate() itself is deterministic, so a
     # GPU-vs-CPU difference cannot be dismissed as run-to-run noise.

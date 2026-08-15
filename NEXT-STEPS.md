@@ -3,6 +3,20 @@
 Carried over after the optimum-backend merge (2026-08-13); everything else
 from that branch's checklist shipped or is recorded in README/TODONT.
 
+- **transformers main breaks the optimum backend's TEXT-ONLY path**
+  (found 2026-08-15). `transformers 5.16.0.dev0` calls
+  `get_experts_implementation()` from `_optimize_model_for_decode()` on
+  every `_sample()`; `OVModelForCausalLM` doesn't implement it, so
+  `generate()` dies with AttributeError. `OVModelForVisualCausalLM` has its
+  own `generate()` and is unaffected — which is the only reason Glimmer
+  (VLM-shaped export) works, and why this went unnoticed. Affects
+  `venv-optimum` and `venv-optimum-nightly` alike; it's a transformers
+  regression, not an OpenVINO one. Consequences: any future text-only
+  optimum-backend model (nemotron_h) will hit it, and
+  `install-optimum.ps1`'s `-TransformersRef main` default is the exposure.
+  Decide between pinning a known-good transformers ref as the default and
+  waiting for optimum-intel to catch up. `scripts/device-divergence.py`
+  carries a loudly-announced shim for dense models.
 - Qwen3.5-4B vision verdict for the registry note (models.json).
 - SmolLM3 registry notes could mention thinking-mode + `/no_think`.
 - Nemotron Lightning: still blocked upstream (PR #1789 merged descoped — no
