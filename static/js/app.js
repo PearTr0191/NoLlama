@@ -380,15 +380,34 @@ function renderMarkdown(text, isStreaming) {
 
     // Complete: <think>...</think> followed by the actual answer
     let thinkMatch = text.match(/^<think>([\s\S]*?)<\/think>\s*([\s\S]*)$/);
+    // Orphan closing tag: a CLOSING </think> with no opening one. Several chat
+    // templates pre-seed "<think>" into the *prompt* as the assistant's
+    // generation prefix, so the model only ever emits the closer — the opening
+    // tag never appears in the output we see. Without this branch the entire
+    // reasoning trace, plus a literal "</think>", renders as the answer.
+    // Observed on Qwen3.8-27B (2026-08-15) and on SmolLM3, which emits a bare
+    // "</think>" even when it skips reasoning entirely.
+    let thinkClose = !thinkMatch && text.match(/^([\s\S]*?)<\/think>\s*([\s\S]*)$/);
     // Partial: <think> started but no closing tag yet (streaming)
-    let thinkOpen = !thinkMatch && text.match(/^<think>([\s\S]*)$/);
+    let thinkOpen = !thinkMatch && !thinkClose && text.match(/^<think>([\s\S]*)$/);
     // Very early: just the opening tag arriving character by character
-    let thinkStarting = !thinkMatch && !thinkOpen && /^<(?:t(?:h(?:i(?:n(?:k)?)?)?)?)?$/.test(text.trim());
+    let thinkStarting = !thinkMatch && !thinkClose && !thinkOpen && /^<(?:t(?:h(?:i(?:n(?:k)?)?)?)?)?$/.test(text.trim());
 
     if (thinkMatch) {
         const thinkContent = thinkMatch[1].trim();
         mainText = thinkMatch[2].trim();
         // Skip empty think blocks (no-think mode sometimes emits empty tags)
+        if (thinkContent) {
+            thinkHtml = renderThinkingBlock(thinkContent, false, thinkExpanded ? '' : 'collapsed');
+        }
+    } else if (thinkClose) {
+        // Same handling as the paired case. Note this only settles once the
+        // closer arrives: mid-stream we cannot tell a pre-seeded thinker from
+        // a model that simply never thinks, so the text streams as the answer
+        // and snaps into a collapsed block at </think>. That is the safe way
+        // round — the alternative hides a non-thinking model's whole reply.
+        const thinkContent = thinkClose[1].trim();
+        mainText = thinkClose[2].trim();
         if (thinkContent) {
             thinkHtml = renderThinkingBlock(thinkContent, false, thinkExpanded ? '' : 'collapsed');
         }
