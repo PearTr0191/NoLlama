@@ -261,9 +261,11 @@ correctly — integrated or discrete** — use `--device CPU`:
   transformers `main`, so without it "the GPU is broken" and "transformers
   regressed this week" fit the evidence equally well.
 
-  Read the *think channel*, not the answer: restating the system prompt
-  there is normal Glimmer behaviour on CPU too. The tell is words going
-  missing from that restatement, not the restatement itself.
+  Read the *think channel*, not the answer — but note that restating the
+  system prompt there is normal Glimmer behaviour, on CPU too. The tell is
+  words going *missing* from that restatement, not the restatement itself.
+  (Distinct from the Xe2 case, where it quoted a system prompt that was
+  never sent at all — that one really is hallucination.)
 
 Four device classes across two OSes, so this is plugin-wide rather than any
 one generation; tracked upstream as

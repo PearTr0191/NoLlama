@@ -71,11 +71,13 @@ keeping:
   yielding — this is *not* the uninterruptible-native-code case. Cap
   `max_tokens` when testing so a corrupt run ends in seconds.
 - **Restating the system prompt in the think channel is normal**, on CPU
-  too. An earlier draft of this entry called it "hallucinates an entire
-  fake system prompt"; the same-machine CPU control showed that is just
-  what Glimmer does. The real tell is *words going missing* from that
-  restatement ("Respond directly." for a 15-word system prompt), which is
-  the same dropped-words signature as the user-message garbling.
+  too — so not every mention of it is a symptom. On the B60 the think
+  channel read `Respond directly.` where the real system prompt is 15
+  words; the CPU control produced the full text. That is the *dropped
+  words* signature, not hallucination. Keep it distinct from the Xe2
+  observation of a wholly **fake** system prompt ("You are an expert in
+  competitive programming…", never sent) — that one is real hallucination
+  and still stands. Two different symptoms; don't merge them.
 
 **Always run the CPU control on the same box, same venv, same session.**
 `install-optimum.ps1` tracks transformers `main`, so the stack moves between
