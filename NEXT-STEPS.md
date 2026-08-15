@@ -3,6 +3,19 @@
 Carried over after the optimum-backend merge (2026-08-13); everything else
 from that branch's checklist shipped or is recorded in README/TODONT.
 
+- **Qwen3.8-27B on the B60** (branch `qwen38-nightly`, cut 2026-08-15).
+  `install.ps1 -Nightly` builds `venv-nightly/` on OpenVINO 2026.4.0-nightly;
+  dry-run confirms the index serves `openvino 2026.4.0.dev20260814` +
+  `openvino-genai 2026.4.0.0.dev20260814`, exactly the model card's floor.
+  Nothing in nollama.py needed changing — `is_vlm` already matches the
+  Qwen3.5-style three-file vision export. **Untested: no run has happened
+  yet.** Test order on the B60: (1) does it load in 24 GB, (2) does it
+  answer coherently — the same comprehension check the Glimmer iGPU bug
+  demands, since a nightly runtime on an experimental export is exactly
+  where silent corruption hides, (3) only then tok/s and TTFT. Merge gate:
+  loads *and* comprehends on a real device. If it corrupts like Glimmer
+  does on Xe2/Xe3, that is a second data point for openvino#37419 and the
+  branch waits.
 - Qwen3.5-4B vision verdict for the registry note (models.json).
 - SmolLM3 registry notes could mention thinking-mode + `/no_think`.
 - Nemotron Lightning: still blocked upstream (PR #1789 merged descoped — no

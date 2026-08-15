@@ -5,6 +5,7 @@
 #     .\install.ps1                       # interactive setup
 #     .\install.ps1 -SkipModel            # venv + deps only
 #     .\install.ps1 -HfToken hf_xxx       # auth for gated/private models
+#     .\install.ps1 -Nightly              # OpenVINO nightly stack in venv-nightly/
 #
 # Detects available devices (NPU, GPU, CPU), then asks what you want to DO
 # (chat / coding agent / vision / combos) and places each model on the best
@@ -17,10 +18,23 @@
 # because this script is what installs 'hf' in the first place, so the token
 # is passed through the HF_TOKEN env var that huggingface_hub reads at
 # download time.
+#
+# -Nightly: build a SECOND venv (venv-nightly/) on the OpenVINO nightly
+# wheels instead of touching venv/. Some Intel-published IRs land months
+# before the runtime that reads them ships — Qwen3.8-27B needs OpenVINO
+# 2026.4.0-nightly and an openvino-genai nightly from 2026-08-14+. Nightly
+# wheels change daily and Intel marks those exports EXPERIMENTAL, so the
+# stable venv keeps its reproducible requirements.txt and the generated
+# start.ps1 records which venv it belongs to. Models that need this stack
+# carry "requires_nightly": true in models.json and are hidden from the
+# menus unless -Nightly is passed.
 
 param(
     [switch]$SkipModel,
-    [string]$HfToken
+    [string]$HfToken,
+    [switch]$Nightly,
+    # Override if the nightly index moves, or point at a local wheel dir.
+    [string]$NightlyIndex = "https://storage.openvinotoolkit.org/simple/wheels/nightly"
 )
 
 $ErrorActionPreference = "Stop"
@@ -49,7 +63,25 @@ Write-Host ""
 # 1. Create venv
 # ---------------------------------------------------------------------------
 
-$VenvDir = Join-Path $ScriptDir "venv"
+# -Nightly gets its own venv so a nightly experiment can never leave the
+# stable install in a half-upgraded state. Both are complete NoLlama runtimes;
+# start.ps1 is generated pointing at whichever one built it.
+$VenvName = if ($Nightly) { "venv-nightly" } else { "venv" }
+$VenvDir  = Join-Path $ScriptDir $VenvName
+
+if ($Nightly) {
+    Write-Host "[!] Nightly mode: building $VenvName/ on OpenVINO nightly wheels." -ForegroundColor Yellow
+    Write-Host "    Your stable venv/ is left untouched. Nightly builds are not" -ForegroundColor DarkGray
+    Write-Host "    reproducible and Intel marks the models needing them EXPERIMENTAL." -ForegroundColor DarkGray
+    Write-Host "    Index: $NightlyIndex" -ForegroundColor DarkGray
+    Write-Host ""
+    # optimum-intel is installed from git in this stack (qwen3_5 VLM support
+    # is unreleased), and pip shells out to git to fetch it.
+    if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
+        Write-Host "ERROR: -Nightly needs 'git' on PATH (optimum-intel installs from GitHub)." -ForegroundColor Red
+        Pop-Location; exit 1
+    }
+}
 
 # Validate existing venv. Script launchers (pip.exe, hf.exe, ...) bake the
 # absolute path to python.exe into themselves at install time. If the venv
@@ -69,14 +101,14 @@ if (Test-Path $VenvDir) {
         $venvPython = Join-Path $VenvDir $VenvBinDir "python$ExeExt"
         $genaiVer = & $venvPython -c "import openvino_genai as og; print(og.__version__)" 2>$null
         if (-not $genaiVer) { $genaiVer = "openvino-genai not installed?" }
-        Write-Host "[OK] venv already exists (openvino-genai $genaiVer)"
+        Write-Host "[OK] $VenvName already exists (openvino-genai $genaiVer)"
         Write-Host "     Recreating it pulls the newest OpenVINO runtime." -ForegroundColor DarkGray
         $reply = Read-Host "     Delete and recreate venv for a fresh install? [y/N]"
         if ($reply -in @("y", "Y", "yes")) {
             Remove-Item -Recurse -Force $VenvDir
         }
     } else {
-        Write-Host "[!] venv at $VenvDir is broken (likely moved from another path). Recreating..." -ForegroundColor Yellow
+        Write-Host "[!] $VenvName at $VenvDir is broken (likely moved from another path). Recreating..." -ForegroundColor Yellow
         Remove-Item -Recurse -Force $VenvDir
     }
 }
@@ -94,10 +126,10 @@ if (-not (Test-Path $VenvDir)) {
         Write-Host "  Install Python 3.10+ (python.org on Windows, your package manager on Linux)." -ForegroundColor Yellow
         Pop-Location; exit 1
     }
-    Write-Host "Creating Python venv (using $($sysPython.Source))..."
+    Write-Host "Creating Python $VenvName (using $($sysPython.Source))..."
     & $sysPython.Source -m venv $VenvDir
     if (-not $?) { Write-Host "ERROR: Failed to create venv." -ForegroundColor Red; Pop-Location; exit 1 }
-    Write-Host "[OK] venv created"
+    Write-Host "[OK] $VenvName created"
 }
 
 $ActivateScript = Join-Path $VenvDir $VenvBinDir "Activate.ps1"
@@ -105,8 +137,36 @@ $ActivateScript = Join-Path $VenvDir $VenvBinDir "Activate.ps1"
 
 Write-Host "Installing dependencies..."
 python -m pip install --upgrade pip wheel setuptools 2>&1 | Out-Null
-python -m pip install -r (Join-Path $ScriptDir "requirements.txt")
-if (-not $?) { Write-Host "ERROR: pip install failed" -ForegroundColor Red; Pop-Location; exit 1 }
+if ($Nightly) {
+    # Two passes, deliberately. Everything that lives on PyPI installs
+    # normally; only the three OpenVINO packages get --pre against the
+    # nightly index. A single --pre pass over the whole set would also let
+    # pip pick release candidates of numpy/pillow/etc, which is a different
+    # (and unwanted) experiment.
+    python -m pip install -r (Join-Path $ScriptDir "requirements-nightly.txt")
+    if (-not $?) { Write-Host "ERROR: pip install failed (base deps)" -ForegroundColor Red; Pop-Location; exit 1 }
+
+    Write-Host "Upgrading OpenVINO to nightly..." -ForegroundColor Yellow
+    python -m pip install --pre -U openvino openvino-tokenizers openvino-genai --extra-index-url $NightlyIndex
+    if (-not $?) { Write-Host "ERROR: pip install failed (nightly OpenVINO)" -ForegroundColor Red; Pop-Location; exit 1 }
+
+    # Print what actually landed. The versions are the thing to quote when
+    # reporting a nightly result upstream — "openvino nightly" is not a
+    # reproducible statement, "2026.4.0.dev20260814" is.
+    $ovVers = python -c "import openvino, openvino_genai; print(openvino.__version__); print(openvino_genai.__version__)" 2>$null
+    if ($ovVers) {
+        $lines = @($ovVers -split "`r?`n" | Where-Object { $_ })
+        Write-Host "[OK] Nightly runtime: openvino $($lines[0])" -ForegroundColor Green
+        Write-Host "                      openvino-genai $($lines[1])" -ForegroundColor Green
+        Write-Host "     Quote these two lines in any bug report." -ForegroundColor DarkGray
+    } else {
+        Write-Host "[!] Installed, but 'import openvino_genai' failed - the nightly may be broken today." -ForegroundColor Yellow
+        Write-Host "    Retry tomorrow, or pin an older nightly with -NightlyIndex." -ForegroundColor DarkGray
+    }
+} else {
+    python -m pip install -r (Join-Path $ScriptDir "requirements.txt")
+    if (-not $?) { Write-Host "ERROR: pip install failed" -ForegroundColor Red; Pop-Location; exit 1 }
+}
 Write-Host "[OK] Dependencies installed"
 Write-Host ""
 
@@ -272,7 +332,15 @@ function Show-ModelMenu {
 
     $localNames = @($LocalModels | ForEach-Object { $_.Name.ToLower() })
     $downloads = @()
+    $hiddenNightly = 0
     foreach ($dm in $RegistryModels) {
+        # Models whose IR only loads on the OpenVINO nightly runtime stay out
+        # of the stable menu entirely — offering a 16 GB download that then
+        # fails to load is worse than not offering it. Same filter for the
+        # on-disk branch below: having the weights doesn't help if this venv
+        # can't read them.
+        if ($dm.requires_nightly -and -not $Nightly) { $hiddenNightly++; continue }
+
         $repoName = ($dm.hf_id -split '/')[-1]
         # Already surfaced by the generic scan (matched on folder name)?
         if ($repoName.ToLower() -in $localNames) { continue }
@@ -321,6 +389,12 @@ function Show-ModelMenu {
             Write-Host "  (~$($dm.SizeGB) GB, $dlTag)" -ForegroundColor DarkGray -NoNewline
             Write-Host "  $($dm.Notes)" -ForegroundColor DarkGray
         }
+    }
+
+    if ($hiddenNightly -gt 0) {
+        Write-Host ""
+        Write-Host "  ($hiddenNightly model(s) hidden: they need the OpenVINO nightly runtime." -ForegroundColor DarkGray
+        Write-Host "   Re-run as '.\install.ps1 -Nightly' to see them.)" -ForegroundColor DarkGray
     }
 
     Write-Host ""
@@ -628,9 +702,12 @@ $StartScript = Join-Path $ScriptDir "start.ps1"
 $TemplateScript = Join-Path $ScriptDir "start-template.ps1"
 $ArgsStr = $StartArgs -join " "
 
-# Generate start.ps1 — a one-liner that calls the template with the right args
+# Generate start.ps1 — a one-liner that calls the template with the right args.
+# -VenvName pins the launcher to the venv this install built, so a machine can
+# hold both a stable venv/ and an experimental venv-nightly/ without start.ps1
+# silently launching the wrong runtime.
 $Content = "# Auto-generated by install.ps1`n"
-$Content += "& '$(Join-Path $ScriptDir "start-template.ps1")' -ServerArgs '$ArgsStr' @args"
+$Content += "& '$(Join-Path $ScriptDir "start-template.ps1")' -ServerArgs '$ArgsStr' -VenvName '$VenvName' @args"
 Set-Content -Path $StartScript -Value $Content -Encoding UTF8
 Write-Host "[OK] Generated start.ps1" -ForegroundColor Green
 

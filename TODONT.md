@@ -688,3 +688,41 @@ Re-evaluate if: someone runs `benchmark.py --backend ollama` on CPU against
 the same model/quantization and OpenVINO wins by a wide margin — that would
 make CPU worth defending on the same measured grounds as the iGPU. Until
 then, don't claim a speed verdict on CPU in docs or in replies to users.
+
+## Putting the OpenVINO nightly stack in the default install (2026-08-15)
+
+Qwen3.8-27B's Intel-published IR needs OpenVINO 2026.4.0-nightly plus an
+openvino-genai nightly from 2026-08-14+. The obvious move is to bump
+`requirements.txt` — the floors are already `>=`, so a one-line change to
+`openvino>=2026.4.0.dev0` plus the nightly `--extra-index-url` would make
+the model Just Work for everyone.
+
+**Verdict:** don't. Nightlies live behind an opt-in `-Nightly` switch that
+builds a separate `venv-nightly/`, and models that need them are hidden
+from the menus unless it's passed.
+
+**Why not:**
+- `requirements.txt` is the reproducibility promise for every existing
+  user. A nightly index resolves to a different build every day, so two
+  people running the same `install.ps1` on the same commit get different
+  runtimes — and one of them gets whatever broke last night. This is the
+  same objection that kept Glimmer out of the installer (NEXT-STEPS
+  "stack gate"): an installer that builds from a moving target promises
+  reproducibility it can't keep.
+- Intel marks the export itself EXPERIMENTAL / "not fully validated with
+  OpenVINO". Shipping an unvalidated runtime to serve an unvalidated model
+  compounds two unknowns for users who asked for neither.
+- The nightly venv needs `transformers==5.2`, which is incompatible with
+  the `<5` cap `requirements.txt` carries for the qwen3_next exporter. One
+  venv genuinely cannot hold both stacks; forcing it would silently break
+  Qwen3-Next conversions to enable one untested model.
+- The cost of the split is small and already paid elsewhere:
+  `install-optimum.ps1` established the second-venv pattern, and
+  `start-template.ps1` now takes `-VenvName` so both runtimes coexist.
+
+Re-evaluate when: OpenVINO 2026.4.0 ships as a **release** and genai's
+qwen3_5 VLM support lands with it. At that point the nightly switch stops
+being about Qwen3.8 (a plain `requirements.txt` bump serves it) and is only
+worth keeping if a *new* pre-runtime model has taken its place. If none
+has, delete `-Nightly` and `requirements-nightly.txt` rather than
+maintaining an unused path.

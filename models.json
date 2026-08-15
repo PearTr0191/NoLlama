@@ -66,6 +66,14 @@
     ],
     "gpu_vlm": [
         {
+            "name": "Qwen3.8 27B (INT4)",
+            "hf_id": "OpenVINO/Qwen3.8-27B-int4-ov",
+            "source": "pre-exported",
+            "est_size_gb": 16,
+            "requires_nightly": true,
+            "notes": "UNTESTED, needs -Nightly (OpenVINO 2026.4 nightly; Intel marks the export experimental). Dense 27B VLM, Apache-2.0, 256k context, image+video. 15.7 GB of weights: needs a 24 GB dGPU (Arc B60) or a big shared-memory budget - won't fit a stock 16 GB 140V. Dense, so --offload-ratio does NOT apply, and as a VLM it gets no prefix cache: expect slow agent turns."
+        },
+        {
             "name": "Qwen3-VL 8B (INT8)",
             "hf_id": "OpenVINO/Qwen3-VL-8B-Instruct-int8-ov",
             "source": "pre-exported",

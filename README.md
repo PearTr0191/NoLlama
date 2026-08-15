@@ -280,6 +280,49 @@ host. Note Glimmer *always* reasons by default (`reasoning_strength`
 defaults to high in its template); the web UI's no-think toggle sends its
 native `Reasoning strength: low.` directive.
 
+## Models that need the OpenVINO nightly runtime (`-Nightly`)
+
+The mirror image of the section above: sometimes Intel publishes a working
+OpenVINO IR *before* the runtime that can read it ships. As of 2026-08
+that's **Qwen3.8-27B** — [`OpenVINO/Qwen3.8-27B-int4-ov`](https://huggingface.co/OpenVINO/Qwen3.8-27B-int4-ov),
+published 2026-08-14, which needs OpenVINO **2026.4.0-nightly** and an
+openvino-genai nightly from 2026-08-14 or later. Nothing in NoLlama needs
+changing to serve it (`is_vlm` already recognises the Qwen3.5-style
+three-file vision export); only the wheels do.
+
+```powershell
+.\install.ps1 -Nightly     # builds venv-nightly/, leaves venv/ alone
+.\start.ps1                # generated pointing at venv-nightly
+```
+
+`-Nightly` never touches your stable `venv/`. It builds a second, complete
+runtime in `venv-nightly/` and bakes `-VenvName venv-nightly` into the
+generated `start.ps1`, so a machine can hold both and launch either. The
+install prints the exact wheel versions it landed on — quote those in any
+bug report, because "openvino nightly" is not a reproducible statement.
+
+Registry models needing this stack carry `"requires_nightly": true` in
+`models.json` and are **hidden from the normal menus** (the menu says how
+many, and how to see them). Offering a 16 GB download that then fails to
+load is worse than not offering it.
+
+Know what you are signing up for before you pull 15.7 GB:
+
+- Intel labels the export **experimental / "not fully validated with
+  OpenVINO"**, and nightly wheels change daily.
+- It is a **VLM**, so it lands on `VLMPipeline` — **no prefix cache, no
+  prewarm**. For agent work that means every turn re-prefills the system
+  prompt. Fine for chat and vision; painful for OpenClaw.
+- It is **dense**, not MoE, so `--offload-ratio` does nothing for it. The
+  15.7 GB of weights must be resident.
+- That rules out a stock 16 GB Arc 140V. It wants a 24 GB card (Arc B60)
+  or a raised shared-memory budget.
+- `venv-nightly/` pins `transformers==5.2` per Intel's model card, which
+  is the opposite of `requirements.txt`'s `<5` cap — so **Qwen3-Next
+  conversions must still run from `venv/`**.
+
+Untested here as of this writing; the Arc B60 run is the verdict.
+
 ## What it does
 
 - **OpenAI API** (`/v1/chat/completions`) — works with any OpenAI client, OpenWebUI, etc.
