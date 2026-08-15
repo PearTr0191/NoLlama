@@ -43,8 +43,19 @@ remote code isn't needed at all; (c) anyone captures the actual
 Idea: serve Muse-Glimmer-30B int4 on the iGPU instead of CPU — the 140V
 warmed up in 2.9s and streamed at ~2.8 tok/s, looked like a win.
 
-**Verdict:** don't, on **any Intel GPU — integrated or discrete** — until a
-new OpenVINO GPU plugin passes the comprehension test below. Xe-LPG fails
+**RESOLVED 2026-08-15 — fixed in OpenVINO 2026.4.** On
+`2026.4.0.dev20260814` the issue's own repro quotes the prompt verbatim on
+the B60 GPU and decodes at 8-9 tok/s (vs ~2 while corrupt, and 1.0 on the CPU
+control). The verdict below stands for **2026.3 and earlier**, which is still
+what a `pip install openvino` gives you today — `nollama.py` therefore keys
+its GPU warning on the runtime version, not the device. Everything after this
+paragraph is the pre-fix evidence; keep it, because it is what that version
+check is protecting users from, and because the *method* (same-venv CPU
+control) is what made the verdict trustworthy in both directions.
+
+**Verdict (OpenVINO <= 2026.3):** don't, on **any Intel GPU — integrated or
+discrete** — until a new OpenVINO GPU plugin passes the comprehension test
+below. Xe-LPG fails
 loudly at warmup (`Count is called for dynamic shape`). Xe2 (Arc 140V,
 OpenVINO 2026.3, Windows) is the trap: it runs and *looks* healthy, but
 inference is numerically wrong — and a community report (issue #24,

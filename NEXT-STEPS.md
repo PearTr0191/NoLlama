@@ -10,15 +10,18 @@ from that branch's checklist shipped or is recorded in README/TODONT.
   request offering to test (the Glimmer issue #1927 pattern that worked).
 - OpenVINO GPU-plugin bug for Glimmer-on-iGPU filed/tracked — re-run the
   TODONT comprehension test on each new OpenVINO release.
-- ~~When the B60 arrives: run the comprehension test FIRST.~~ **Done
-  2026-08-15: the B60 FAILS it.** Discrete Battlemage shows the same
-  corruption as Xe2/Xe3, with a same-machine CPU control clean, so the
-  shared-memory theory is dead and the bug is plugin-wide. Details in
-  TODONT/README. Remaining: **post the verdict to openvino#37419** — the
-  issue currently reads as iGPU-only and that framing is now wrong; it
-  needs the dGPU repro, the runaway-not-deadlock detail, and the
-  transformers-version control note. No benchmark (correctness gate not
-  passed).
+- ~~When the B60 arrives: run the comprehension test.~~ **Done 2026-08-15,
+  and it ended better than expected.** On OpenVINO 2026.3 the B60 fails
+  exactly like Xe2/Xe3 (posted to openvino#37419, killing the
+  shared-memory theory). On **2026.4.0.dev20260814 it is FIXED** — the
+  issue's own repro quotes the prompt verbatim on GPU, at 8-9 tok/s vs 1.0
+  on the CPU control. Remaining: post the fix confirmation to #37419.
+- Glimmer's **device gate is now open on 2026.4** (8-9 tok/s is usable, not
+  just verifiable) — but that is a *nightly*, so it converts the old
+  two-gate problem into a waiting game on the 2026.4 release. When 2026.4
+  ships stable, re-run the comprehension test on it and the device gate
+  closes for real. The stack gate (muse_glimmer in released transformers +
+  optimum-intel) is unaffected and still shut.
 - Glimmer in install.ps1/models.json: **deliberately absent** until BOTH
   gates close. (1) Stack gate — muse_glimmer in *released*
   transformers + optimum-intel, so the standard venv serves it with a
