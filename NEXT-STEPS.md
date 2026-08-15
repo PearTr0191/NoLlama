@@ -21,13 +21,20 @@ from that branch's checklist shipped or is recorded in README/TODONT.
   diverge into different-but-coherent reasoning, both reaching the correct
   answer. That divergence is **observed, not explained.** It is plausibly
   ordinary cross-plugin numerics (an argmax near-tie flipping, then
-  cascading), but nothing here establishes that. Two cheap experiments
-  would: (1) run `scripts/glimmer-37419-repro.py` twice on the SAME device
-  and confirm byte-identical output, proving the runs are deterministic at
-  all; (2) run a known-good model GPU-vs-CPU greedy and see whether it
-  diverges the same way — if other models match exactly, Glimmer's
-  divergence is suspicious rather than normal. Until then, report it to
-  upstream as an observation and let them judge.
+  cascading), but nothing here establishes that.
+  - Experiment (1) **done 2026-08-15: runs are deterministic.** A second
+    run of `scripts/glimmer-37419-repro.py` was byte-identical to the first
+    on *both* devices, so the divergence is reproducible, not noise.
+  - Experiment (2) **still open**: run a known-good model GPU-vs-CPU greedy
+    and see whether it diverges the same way. If other models match
+    exactly, Glimmer's divergence is suspicious rather than normal. Until
+    then it stays an observation, reported upstream as such.
+- Correctness on 2026.4/GPU verified well past the `HELLO!` test: a
+  409-char multi-step word problem quoted back verbatim and solved with
+  correct intermediates (30%), 17*23=391, sum 2..8=35, no non-terminating
+  runs. Worth remembering the method — the short prompt was only ever the
+  cheap screen; a long prompt with numbers in it is the real test, since
+  the 2026.3 failure could not hold 30 characters intact.
 - Glimmer's **device gate is now open on 2026.4** (8-9 tok/s is usable, not
   just verifiable) — but that is a *nightly*, so it converts the old
   two-gate problem into a waiting game on the 2026.4 release. When 2026.4
