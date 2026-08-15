@@ -26,6 +26,7 @@ here, that is evidence about the plugin, not proof about the optimum path.
 
 Use venv-nightly (OpenVINO 2026.4 nightly + genai), not venv-optimum*.
 """
+import gc
 import os
 import sys
 
@@ -64,23 +65,40 @@ print(f"max_new_tokens  {MAX_NEW}   greedy (do_sample=False)")
 print("=" * 72)
 
 
-def run(device):
-    """Two greedy generations on one device; returns (text, deterministic)."""
-    print(f"--- loading on {device} ---", flush=True)
+def generate_once(device):
+    """One greedy generation from a FRESHLY constructed pipeline.
+
+    Rebuilding the pipeline per run is deliberate. Two generate() calls on a
+    single pipeline instance are not necessarily independent — if any KV or
+    internal state survives between calls, run 2 starts from a different
+    place and the output differs for reasons that have nothing to do with
+    plugin numerics. Measured 2026-08-15 on a B60: reusing one pipeline gave
+    non-identical GPU runs (996 vs 989 chars) while CPU repeated exactly,
+    which is precisely the shape a state-carryover bug would take. A fresh
+    pipeline per run is the only way to isolate "is the plugin
+    deterministic" from "is the pipeline stateless".
+    """
     pipe = (ovg.VLMPipeline if vlm else ovg.LLMPipeline)(MODEL, device=device)
     cfg = ovg.GenerationConfig()
     cfg.max_new_tokens = MAX_NEW
     cfg.do_sample = False
+    res = pipe.generate(PROMPT, cfg) if not vlm else pipe.generate(PROMPT, generation_config=cfg)
+    text = res.texts[0] if hasattr(res, "texts") else str(res)
+    del pipe
+    gc.collect()
+    return text
+
+
+def run(device):
+    """Two greedy generations, each from its own pipeline."""
+    print(f"--- {device} ---", flush=True)
     outs = []
     for i in (1, 2):
-        res = pipe.generate(PROMPT, cfg) if not vlm else pipe.generate(PROMPT, generation_config=cfg)
-        text = res.texts[0] if hasattr(res, "texts") else str(res)
-        outs.append(text)
-        print(f"    run {i}: {len(text)} chars", flush=True)
+        outs.append(generate_once(device))
+        print(f"    run {i} (fresh pipeline): {len(outs[-1])} chars", flush=True)
     same = outs[0] == outs[1]
     print(f"    {device} run1 == run2: {same}"
-          f"{'' if same else '   <-- NOT DETERMINISTIC, results below are meaningless'}\n")
-    del pipe
+          f"{'' if same else '   <-- NOT DETERMINISTIC even with a fresh pipeline'}\n")
     return outs[0], same
 
 
@@ -98,8 +116,11 @@ first = next((i for i in range(n) if gpu_ids[i] != cpu_ids[i]), None)
 
 print("=" * 72)
 if not (gpu_det and cpu_det):
-    print("INCONCLUSIVE: a device was not self-consistent across two runs.")
-    print("Fix that before comparing devices — nothing below means anything.")
+    print("INCONCLUSIVE for the divergence question — but note WHICH device.")
+    print("Each run built a fresh pipeline, so state carryover between")
+    print("generate() calls is already excluded. A device that still differs")
+    print("from itself is non-deterministic under greedy decoding, which is a")
+    print("bigger finding than the CPU-vs-GPU question this script asks.")
 elif gpu_text == cpu_text:
     print(f"IDENTICAL: GPU and CPU produced the same {len(gpu_ids)} tokens.")
     print("=> The GPU plugin shows NO divergence from CPU on this model.")
