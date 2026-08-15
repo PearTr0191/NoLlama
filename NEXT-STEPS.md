@@ -16,6 +16,18 @@ from that branch's checklist shipped or is recorded in README/TODONT.
   shared-memory theory). On **2026.4.0.dev20260814 it is FIXED** — the
   issue's own repro quotes the prompt verbatim on GPU, at 8-9 tok/s vs 1.0
   on the CPU control. Remaining: post the fix confirmation to #37419.
+- **Open question from that run, don't state it as settled:** under greedy
+  decoding the GPU and CPU traces are identical for ~40 tokens and then
+  diverge into different-but-coherent reasoning, both reaching the correct
+  answer. That divergence is **observed, not explained.** It is plausibly
+  ordinary cross-plugin numerics (an argmax near-tie flipping, then
+  cascading), but nothing here establishes that. Two cheap experiments
+  would: (1) run `scripts/glimmer-37419-repro.py` twice on the SAME device
+  and confirm byte-identical output, proving the runs are deterministic at
+  all; (2) run a known-good model GPU-vs-CPU greedy and see whether it
+  diverges the same way — if other models match exactly, Glimmer's
+  divergence is suspicious rather than normal. Until then, report it to
+  upstream as an observation and let them judge.
 - Glimmer's **device gate is now open on 2026.4** (8-9 tok/s is usable, not
   just verifiable) — but that is a *nightly*, so it converts the old
   two-gate problem into a waiting game on the 2026.4 release. When 2026.4
