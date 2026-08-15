@@ -77,6 +77,18 @@ if ($HfToken) {
 $VenvBinDir = if ($IsWindows) { "Scripts" } else { "bin" }
 $VenvRoot = if ($Venv) { $Venv } else { Join-Path $ScriptDir "venv" }
 $VenvActivate = Join-Path $VenvRoot $VenvBinDir "Activate.ps1"
+# A machine set up with 'install.ps1 -Nightly' has venv-nightly/ and no
+# venv/. Fall back to it rather than dropping to system Python, which almost
+# certainly lacks the 'hf' CLI this script is about to call.
+if (-not $Venv -and -not (Test-Path $VenvActivate)) {
+    $nightlyRoot = Join-Path $ScriptDir "venv-nightly"
+    $nightlyActivate = Join-Path $nightlyRoot $VenvBinDir "Activate.ps1"
+    if (Test-Path $nightlyActivate) {
+        Write-Host "[i] No venv/ - using venv-nightly/ (nightly install)." -ForegroundColor DarkGray
+        $VenvRoot = $nightlyRoot
+        $VenvActivate = $nightlyActivate
+    }
+}
 if (Test-Path $VenvActivate) {
     & $VenvActivate
 } elseif ($Venv) {
