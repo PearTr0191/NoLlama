@@ -380,13 +380,15 @@ function renderMarkdown(text, isStreaming) {
 
     // Complete: <think>...</think> followed by the actual answer
     let thinkMatch = text.match(/^<think>([\s\S]*?)<\/think>\s*([\s\S]*)$/);
-    // Orphan closing tag: a CLOSING </think> with no opening one. Several chat
-    // templates pre-seed "<think>" into the *prompt* as the assistant's
-    // generation prefix, so the model only ever emits the closer — the opening
-    // tag never appears in the output we see. Without this branch the entire
-    // reasoning trace, plus a literal "</think>", renders as the answer.
-    // Observed on Qwen3.8-27B (2026-08-15) and on SmolLM3, which emits a bare
-    // "</think>" even when it skips reasoning entirely.
+    // Orphan closing tag: a CLOSING </think> with no opening one. This is not
+    // a model quirk — the chat template pre-seeds the opening tag into the
+    // PROMPT as the assistant's generation prefix, so it never appears in the
+    // generated text. Qwen3.8's template ends with:
+    //     {{- '<|im_start|>assistant\n' }}  ... {{- '<think>\n' }}
+    // The model therefore starts generating already inside the block and only
+    // ever emits the closer. Both Qwen3.8 and SmolLM3 reason fully here; the
+    // reasoning is real, it was just being rendered as the answer along with a
+    // literal "</think>". Observed on the B60, 2026-08-15.
     let thinkClose = !thinkMatch && text.match(/^([\s\S]*?)<\/think>\s*([\s\S]*)$/);
     // Partial: <think> started but no closing tag yet (streaming)
     let thinkOpen = !thinkMatch && !thinkClose && text.match(/^<think>([\s\S]*)$/);
