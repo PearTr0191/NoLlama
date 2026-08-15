@@ -129,9 +129,25 @@ elif gpu_text == cpu_text:
     print("   deserves a follow-up.")
 else:
     idx = n if first is None else first
+
+    def window(ids, i, before=12, after=12):
+        """Decode a TOKEN window. Slicing the text by a token index (the
+        earlier bug here) shows the same characters for both devices and
+        makes a real divergence look like none at all."""
+        lo, hi = max(0, i - before), min(len(ids), i + after)
+        return tokzr.decode(ids[lo:hi])
+
+    def tok_at(ids, i):
+        return f"{ids[i]} ({tokzr.decode([ids[i]])!r})" if i < len(ids) else "<past end>"
+
     print(f"DIVERGES at re-encoded token index {idx} (of {n} compared).")
-    print(f"  GPU: ...{gpu_text[max(0, idx - 60):idx + 60]!r}")
-    print(f"  CPU: ...{cpu_text[max(0, idx - 60):idx + 60]!r}")
+    print(f"  agreed up to there: ...{tokzr.decode(gpu_ids[max(0, idx - 12):idx])!r}")
+    print(f"  GPU token {idx}: {tok_at(gpu_ids, idx)}")
+    print(f"  CPU token {idx}: {tok_at(cpu_ids, idx)}")
+    print(f"  GPU continues: {window(gpu_ids, idx)!r}")
+    print(f"  CPU continues: {window(cpu_ids, idx)!r}")
     print("=> The plugin does differ across devices on a known-good model,")
     print("   which is the ordinary-numerics reading of Glimmer's behaviour.")
+    print("   Glimmer diverged around token 40 — compare that with the index")
+    print("   above before concluding anything about it.")
 print("=" * 72)
