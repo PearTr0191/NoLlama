@@ -102,11 +102,22 @@ def generate_once(device):
 
     Practical: `del pipe; gc.collect()` does NOT unload the GPU plugin from
     the process. Its allocations survive, and WDDM demotes them from
-    dedicated to the shared segment rather than freeing them. On 2026-08-15
-    that left ~13.7 GB held while the CPU phase then loaded a 27B model
-    (~15.7 GB) into the same 32 GB of RAM — and the workstation went down.
-    A subprocess per generation is the only reliable teardown: when it
-    exits, the OS reclaims everything, plugin included.
+    dedicated to the shared segment rather than freeing them — ~13.7 GB
+    still held, which is real and worth avoiding on a memory-tight box. A
+    subprocess per generation is the only reliable teardown: when it exits,
+    the OS reclaims everything, plugin included.
+
+    CORRECTION (2026-08-16): an earlier version of this note, and the commit
+    that introduced subprocess isolation, blamed that retention for crashing
+    the test workstation mid-run. That was wrong. The same machine later
+    went down while merely installing an npm package — no GPU, no model, no
+    memory pressure — so the crashes are a hardware fault on that box, not
+    this script. Two coincidences that made the wrong story fit: the crash
+    landed at the GPU-to-CPU handover twice, and the machine had a 2 GB
+    pagefile (commit limit ~34 GB), which made memory exhaustion look
+    plausible and also explains why no crash dump was ever written. The
+    isolation below is still correct on its own merits; the attribution was
+    not. Reproducibility at the same point is not evidence of cause.
     """
     with tempfile.TemporaryDirectory() as td:
         out = os.path.join(td, "result.json")
