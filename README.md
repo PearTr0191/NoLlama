@@ -242,9 +242,13 @@ Glimmer correctly — integrated or discrete** — so on a release runtime, use
   verification-only into something usable. NoLlama checks the runtime version
   at load and downgrades its GPU warning to a note on 2026.4+.
 
-  Still a nightly, so this doesn't move Glimmer into the installer — see the
-  gates in `NEXT-STEPS.md`. Sanity-check your first reply regardless: the
-  failure mode was always silent.
+  **So Glimmer on an Intel GPU is coming, and we know it works** — but the
+  fix is only in a nightly today, and NoLlama stays leading edge rather
+  than bleeding edge. It moves into `install.ps1`/`models.json` when 2026.4
+  ships as a *release* (and the stack gate closes too — see
+  `NEXT-STEPS.md`); until then the manual path below is the honest
+  offering. Sanity-check your first reply regardless: the failure mode was
+  always silent.
 
 The 2026.3 evidence, kept because it's what the version check is protecting
 you from:

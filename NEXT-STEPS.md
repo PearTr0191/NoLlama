@@ -39,10 +39,19 @@ from that branch's checklist shipped or is recorded in README/TODONT.
   - Experiment (1) **done 2026-08-15: runs are deterministic.** A second
     run of `scripts/glimmer-37419-repro.py` was byte-identical to the first
     on *both* devices, so the divergence is reproducible, not noise.
-  - Experiment (2) **still open**: run a known-good model GPU-vs-CPU greedy
-    and see whether it diverges the same way. If other models match
-    exactly, Glimmer's divergence is suspicious rather than normal. Until
-    then it stays an observation, reported upstream as such.
+  - Experiment (2) **done 2026-08-16: RESOLVED, the divergence is ordinary.**
+    SmolLM3-3B (known-good) on the same B60 via openvino_genai, greedy,
+    subprocess-isolated: GPU and CPU diverge too. The content is the proof
+    — at the divergence point the prompt is "The sky appears blue because
+    ___", GPU picks `' shorter'` and CPU picks `' blue'`, and both
+    continuations are correct and near-equivalent. That is an argmax
+    near-tie flipping, which is what "ordinary cross-plugin numerics"
+    actually looks like. Glimmer needs no special explanation.
+    **Caveat:** the index is NOT a stable quantity — the same model gave 42
+    in one session and 58 in another (reboot in between; CPU was
+    byte-identical across both). Cite it as "divergence occurs in this
+    depth range", never as a precise figure, and never compare two indices
+    from different sessions.
 - Correctness on 2026.4/GPU verified well past the `HELLO!` test: a
   409-char multi-step word problem quoted back verbatim and solved with
   correct intermediates (30%), 17*23=391, sum 2..8=35, no non-terminating
@@ -60,9 +69,13 @@ from that branch's checklist shipped or is recorded in README/TODONT.
   transformers + optimum-intel, so the standard venv serves it with a
   requirements bump; an installer that builds a second venv from git
   main promises reproducibility it can't keep. (2) Device gate — a
-  device where it's both correct and fast enough. **The B60 did not close
-  this** (2026-08-15, corrupt); it now needs an OpenVINO GPU-plugin fix,
-  on any device. Until then the README manual path
+  device where it's both correct and fast enough. The B60 closed this on
+  **2026.4**, but only on the nightly, so it does not count yet.
+  **Standing rule from the user (2026-08-15): not until 2026.4 is
+  *released*. "We want to be leading edge, not BLEEDING edge."** Shipping
+  a menu item that needs a nightly wheel is the definition of bleeding.
+  Docs may say we KNOW Glimmer will work soon — that is honest and
+  useful; the installer may not act on it. Until then the README path
   (install-optimum.ps1) is the honest offering for the self-selecting
   few; CPU-only at 1.4-2.6 tok/s behind a menu item is a disappointment
   machine. Re-check the stack gate alongside the Nemotron watch. Any
