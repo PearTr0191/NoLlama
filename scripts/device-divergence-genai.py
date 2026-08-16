@@ -26,13 +26,23 @@ here, that is evidence about the plugin, not proof about the optimum path.
 
 Use venv-nightly (OpenVINO 2026.4 nightly + genai), not venv-optimum*.
 """
-import gc
+import json
 import os
+import subprocess
 import sys
+import tempfile
+
+# --worker DEVICE OUTFILE MODEL MAX_NEW  — internal, one generation per process.
+WORKER = len(sys.argv) > 1 and sys.argv[1] == "--worker"
+if WORKER:
+    _, _, W_DEVICE, W_OUT, W_MODEL, W_MAX = sys.argv[:6]
 
 DEFAULT_MODEL = os.path.expanduser(r"~/models/SmolLM3-3B-int4-cw-ov")
-MODEL = os.path.expanduser(sys.argv[1]) if len(sys.argv) > 1 else DEFAULT_MODEL
-MAX_NEW = int(sys.argv[2]) if len(sys.argv) > 2 else 200
+if WORKER:
+    MODEL, MAX_NEW = W_MODEL, int(W_MAX)
+else:
+    MODEL = os.path.expanduser(sys.argv[1]) if len(sys.argv) > 1 else DEFAULT_MODEL
+    MAX_NEW = int(sys.argv[2]) if len(sys.argv) > 2 else 200
 
 PROMPT = "Explain, in a few sentences, why the sky appears blue."
 
@@ -56,37 +66,59 @@ if not os.path.isdir(MODEL):
     sys.exit(f"model dir not found: {MODEL}")
 
 vlm = is_vlm(MODEL)
+
+if WORKER:
+    # One generation, then this process dies and the OS reclaims everything.
+    pipe = (ovg.VLMPipeline if vlm else ovg.LLMPipeline)(MODEL, device=W_DEVICE)
+    cfg = ovg.GenerationConfig()
+    cfg.max_new_tokens = MAX_NEW
+    cfg.do_sample = False
+    res = pipe.generate(PROMPT, cfg) if not vlm else pipe.generate(PROMPT, generation_config=cfg)
+    text = res.texts[0] if hasattr(res, "texts") else str(res)
+    with open(W_OUT, "w", encoding="utf-8") as fh:
+        json.dump({"text": text}, fh)
+    sys.exit(0)
+
 print("=" * 72)
 print(f"openvino        {openvino.__version__}")
 print(f"openvino-genai  {ovg.__version__}")
 print(f"model           {MODEL}")
 print(f"pipeline        {'VLMPipeline' if vlm else 'LLMPipeline'}")
 print(f"max_new_tokens  {MAX_NEW}   greedy (do_sample=False)")
+print("isolation       one subprocess per generation")
 print("=" * 72)
 
 
 def generate_once(device):
-    """One greedy generation from a FRESHLY constructed pipeline.
+    """One greedy generation, in its own PROCESS.
 
-    Rebuilding the pipeline per run is deliberate. Two generate() calls on a
-    single pipeline instance are not necessarily independent — if any KV or
-    internal state survives between calls, run 2 starts from a different
-    place and the output differs for reasons that have nothing to do with
-    plugin numerics. Measured 2026-08-15 on a B60: reusing one pipeline gave
+    Two reasons, one methodological and one that cost a machine.
+
+    Methodological: two generate() calls on one pipeline instance are not
+    independent. Measured 2026-08-15 on a B60 — reusing a pipeline gave
     non-identical GPU runs (996 vs 989 chars) while CPU repeated exactly,
-    which is precisely the shape a state-carryover bug would take. A fresh
-    pipeline per run is the only way to isolate "is the plugin
-    deterministic" from "is the pipeline stateless".
+    the exact shape of state carryover. A fresh pipeline per run separates
+    "is the plugin deterministic" from "is the pipeline stateless".
+
+    Practical: `del pipe; gc.collect()` does NOT unload the GPU plugin from
+    the process. Its allocations survive, and WDDM demotes them from
+    dedicated to the shared segment rather than freeing them. On 2026-08-15
+    that left ~13.7 GB held while the CPU phase then loaded a 27B model
+    (~15.7 GB) into the same 32 GB of RAM — and the workstation went down.
+    A subprocess per generation is the only reliable teardown: when it
+    exits, the OS reclaims everything, plugin included.
     """
-    pipe = (ovg.VLMPipeline if vlm else ovg.LLMPipeline)(MODEL, device=device)
-    cfg = ovg.GenerationConfig()
-    cfg.max_new_tokens = MAX_NEW
-    cfg.do_sample = False
-    res = pipe.generate(PROMPT, cfg) if not vlm else pipe.generate(PROMPT, generation_config=cfg)
-    text = res.texts[0] if hasattr(res, "texts") else str(res)
-    del pipe
-    gc.collect()
-    return text
+    with tempfile.TemporaryDirectory() as td:
+        out = os.path.join(td, "result.json")
+        cmd = [sys.executable, os.path.abspath(__file__), "--worker",
+               device, out, MODEL, str(MAX_NEW)]
+        proc = subprocess.run(cmd)
+        if proc.returncode != 0 or not os.path.exists(out):
+            sys.exit(f"worker for {device} failed (exit {proc.returncode}) — "
+                     f"if this is an out-of-memory kill, lower max_new_tokens "
+                     f"or use a smaller model.")
+        with open(out, encoding="utf-8") as fh:
+            return json.load(fh)["text"]
 
 
 def run(device):
