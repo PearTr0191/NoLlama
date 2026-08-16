@@ -3,6 +3,54 @@
 Carried over after the optimum-backend merge (2026-08-13); everything else
 from that branch's checklist shipped or is recorded in README/TODONT.
 
+## B60 test campaign — status at 2026-08-16
+
+Short version: **the correctness work is done. The benchmarking is not.**
+Detail for each item is in the bullets further down; this is the map.
+
+Done, and posted or documented:
+
+1. **Qwen3.8-27B (GenAI path) works on the B60.** Loads in 2.0 s, ~17-19
+   tok/s, passes comprehension well past the `HELLO!` screen. Needs the
+   OpenVINO nightly (branch `qwen38-nightly`).
+2. **Glimmer corrupts on the B60 under OpenVINO <=2026.3** — same
+   fingerprint as Xe2/Xe3, so dedicated VRAM does not escape it and the
+   shared-memory theory is dead. Posted to openvino#37419.
+3. **Glimmer is FIXED on 2026.4.0.dev20260814**, 8-11 tok/s. Verified with
+   the issue's own repro plus harder prompts, against a same-venv CPU
+   control. Posted to openvino#37419.
+4. **The GPU-vs-CPU divergence is ordinary**, not a residue — a known-good
+   model diverges the same way, at an argmax near-tie.
+5. **XMX confirmed present** on the B60 (first discrete-Battlemage
+   datapoint; every previous XMX measurement was the 140V iGPU).
+
+Open, in the order they are worth doing:
+
+- **The workstation has a hardware fault.** It crashed three times, most
+  recently while merely installing an npm package — no GPU, no model, no
+  memory pressure. That is not ours. MemTest86 is running. Also pending:
+  the `BugcheckCode` field on the Kernel-Power 41 events (gives the stop
+  code even though the dumps failed), and enlarging the 2 GB pagefile so
+  future crashes leave evidence at all. **Everything else on this list is
+  blocked behind trusting that machine.**
+- **No benchmark numbers were ever captured.** This is the real gap. The
+  README speed table still reads *wanted* in the Arc dGPU column, and this
+  is the project's first discrete card. The figures quoted above are
+  ad-hoc single runs from the web UI, NOT `benchmark.py` output, and should
+  not be copied into the table as if they were. Wanted: SmolLM3-3B,
+  Qwen3-8B, and Qwen3-30B-A3B (which also exercises `--offload-ratio` on
+  real XMX hardware for the first time).
+- **Post the divergence resolution to openvino#37419.** The comment there
+  leaves it explicitly open ("I do not know whether..."); it now has an
+  answer, and the answer costs them nothing.
+- Two branches are unmerged: `qwen38-nightly` (installer + Web UI, whose
+  `</think>` fix is already backported to main) and `glimmer-b60-verdict`
+  (all the Glimmer/B60 material). Neither has been reviewed as a whole.
+
+Deliberately dropped: the Qwen3.8 GPU-vs-CPU divergence datapoint. It would
+only corroborate a question already answered, and it is the workload that
+was running during two of the crashes.
+
 - **transformers main breaks the optimum backend's TEXT-ONLY path**
   (found 2026-08-15). `transformers 5.16.0.dev0` calls
   `get_experts_implementation()` from `_optimize_model_for_decode()` on
