@@ -34,8 +34,9 @@ OpenAI-compatible LLM/VLM server for Intel hardware. NPU-first.
   served via `_maybe_capture_prewarm` — on both the OpenAI and Ollama chat paths — so: run
   once → restart with `--prewarm`) so even the first turn is a cache hit instead of a cold
   prefill that can trip a client's idle watchdog. Prewarm is auto-enabled as
-  `prewarm-<port>.json` when `--idle-timeout 0` (opt out: `--no-prewarm`); combining
-  `--prewarm` with idle unload warns, since unload discards the warmed cache and the reload
+  `prewarm-<port>.json` when `--idle-timeout 0` (opt out: `--no-prewarm`). `--prewarm`
+  implies `--idle-timeout 0`; an explicit nonzero timeout alongside it is REFUSED at
+  startup (2026-08-18, was a warning) — unload discards the warmed cache and the reload
   path deliberately does NOT re-warm (a synchronous re-warm would stall the triggering
   request pre-SSE and trip the client watchdogs the heartbeat exists to defeat).
 - Observability: per-request log lines include TTFT (streaming: wall-clock to first token;

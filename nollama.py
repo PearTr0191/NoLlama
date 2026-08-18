@@ -3593,10 +3593,12 @@ def parse_args():
                    help="Whisper model directory for speech-to-text (enables /v1/audio/transcriptions)")
     p.add_argument("--whisper-device", default="CPU",
                    help="Device for Whisper: CPU or GPU (default: CPU)")
-    p.add_argument("--idle-timeout", type=int, default=1800,
+    p.add_argument("--idle-timeout", type=int, default=None,
                    help="Change idle-unload timeout in seconds "
                         "(default: 1800 = 30 min). Use 0 to disable unloading "
-                        "(recommended for agent use; also auto-enables --prewarm).")
+                        "(recommended for agent use; also auto-enables --prewarm). "
+                        "--prewarm implies 0; an explicit nonzero timeout "
+                        "combined with --prewarm is refused at startup.")
     p.add_argument("--debug", action="store_true",
                    help="Log every inbound API request (method, path, User-Agent, body)")
     p.add_argument("--vscode-compat", action="store_true",
@@ -3624,7 +3626,8 @@ def parse_args():
                    help="Prefill a saved agent prompt at startup so the first turn is a "
                         "cache hit (no cold-prefill stall). The file auto-populates from the "
                         "first big prompt served, so: run once, then restart with --prewarm. "
-                        "Auto-enabled (as prewarm-<port>.json) when --idle-timeout is 0.")
+                        "Auto-enabled (as prewarm-<port>.json) when --idle-timeout is 0. "
+                        "Implies --idle-timeout 0 (idle unload would discard the cache).")
     p.add_argument("--no-prewarm", action="store_true",
                    help="Disable the automatic prewarm that --idle-timeout 0 turns on.")
     p.add_argument("--offload-ratio", type=int, default=0, metavar="PCT",
@@ -3682,6 +3685,25 @@ def main():
                       "GPU memory.", flush=True)
         except Exception:
             pass
+    # --prewarm exists to keep a warmed cache alive; idle unload exists to
+    # throw loaded state away. The first unload would silently discard the
+    # cache and nothing rebuilds it until restart — so an explicit request
+    # for both is refused rather than warned about, and --prewarm alone
+    # implies --idle-timeout 0 (the bare default stays 1800).
+    if args.idle_timeout is None:
+        if args.prewarm:
+            print("  --prewarm implies --idle-timeout 0 (idle unload would "
+                  "discard the warmed cache)", flush=True)
+            args.idle_timeout = 0
+        else:
+            args.idle_timeout = 1800
+    elif args.prewarm and args.idle_timeout > 0:
+        print("ERROR: --prewarm with a nonzero --idle-timeout: the first idle "
+              "unload discards the warmed cache and nothing rebuilds it until "
+              "restart. Drop --idle-timeout (--prewarm already implies 0), or "
+              "drop --prewarm.")
+        sys.exit(1)
+
     if args.prewarm:
         PREWARM_FILE = os.path.expanduser(args.prewarm)
     elif args.idle_timeout == 0 and not args.no_prewarm and PROMPT_CACHE:
@@ -3860,16 +3882,11 @@ def main():
     for t in threads:
         t.start()
 
-    # Idle watchdog — unload models after inactivity
+    # Idle watchdog — unload models after inactivity. (PREWARM_FILE can't be
+    # set here: --prewarm implies idle-timeout 0 and refuses an explicit
+    # nonzero one, and the auto-prewarm only arms at idle-timeout 0.)
     if args.idle_timeout > 0:
         print(f"  Idle unload after {args.idle_timeout}s of inactivity", flush=True)
-        if PREWARM_FILE:
-            # The prefix cache lives in the pipeline; unload drops both and the
-            # reload path doesn't re-warm (a synchronous re-warm would stall
-            # the triggering request for the whole prefill).
-            print(f"  WARNING: --prewarm + idle unload: the warmed cache is lost "
-                  f"when the model idle-unloads and not rebuilt until restart. "
-                  f"Use --idle-timeout 0 to keep it.", flush=True)
         watchdog = threading.Thread(
             target=_idle_watchdog,
             args=(all_slots, args.idle_timeout),
