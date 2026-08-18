@@ -5,6 +5,18 @@ running NoLlama (or Ollama with `--backend ollama`); it does 1 warmup + N runs
 and discards IQR outliers. The `count 1-100` test is the steady-state decode
 metric used throughout.
 
+**Cross-backend rows need care.** `benchmark.py` pins `temperature: 0` so both
+servers decode greedily — omit it and NoLlama defaults to 0.0 while Ollama
+defaults to 0.8, so one side samples. The same prompt also doesn't buy the same
+work: on `count 1-100`, NoLlama's qwen3-8b emits 293 tokens where Ollama's emits
+~1755 for an identical 291-character answer, because its build ignores
+`/no_think` and spends the rest on hidden reasoning. tok/s is still tok/s — read
+those rows as throughput, not as time to finish the task.
+
+Ollama's OpenAI-compatible `/v1/chat/completions` and its native `/api/chat`
+agree exactly once temperature is pinned (1755 tokens either way), so the
+endpoint choice isn't a variable.
+
 ## Big MoE models on small GPUs (disk offload)
 
 OpenVINO 2026.3 can stream Mixture-of-Experts weights from disk instead of
