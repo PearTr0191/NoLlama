@@ -6,12 +6,20 @@ from that branch's checklist shipped or is recorded in README/TODONT.
 - **Arc dGPU benchmarks: DONE 2026-08-18.** The README's dGPU column is filled
   (SmolLM3 77.9, Qwen3-8B 64.5, 30B-A3B 50.8 resident, `count 1-100` test, Arc
   Pro B60). Two things worth carrying forward:
-  - **Re-measure the older rows.** They were taken with a benchmark harness
-    whose TTFT included stream buffering, so their decode figures read a few
-    percent high, and Windows TTFT measured before the dual-stack bind carried
-    a fixed ~2 s loopback penalty. The dGPU row is the only one measured
-    cleanly. Cross-row TTFT comparison is not meaningful until the rest are
-    redone — the README says so, but the numbers themselves are still old.
+  - **Decode figures are sound; TTFT figures are not.** Checked 2026-08-18 by
+    re-measuring two cells on the 285K, on the same OpenVINO 2026.1 the
+    originals used, with the fixed harness: SmolLM3 iGPU 29.4 vs 29.7 published,
+    Qwen3-8B iGPU 14.6 vs 15.4 — inside the table's own ±10%. No decode
+    correction needed anywhere. But TTFT on that same cell went 4.01 s -> 0.21 s
+    (19×), because the old figure carried the loopback delay plus ~20 generated
+    tokens counted as prefill. **Every pre-2026-08-18 TTFT number in the README
+    is now flagged unusable**, and the "Ollama wins time-to-first-token" claim
+    is withdrawn rather than reversed — Ollama's side went through the same
+    harness and nobody has re-measured it. Redoing that head-to-head needs
+    Ollama installed with the same model on the 140V.
+  - Laptop 140V caution for future benchmarking: a busy laptop reads 30% low
+    (Qwen3-8B int4-cw: 14.8 tok/s with Edge/Discord/Egnyte running, 19.4 quiet).
+    Use the 285K or the B60 box for anything that goes in the table.
   - **Offload non-determinism is unexplained.** Under `--offload-ratio 30` on
     the B60, greedy decoding returned 87-2040 tokens for the same prompt across
     five runs (resident: 478 every time). Recorded in TODONT and the README as

@@ -86,11 +86,15 @@ table (the laptop iGPU beats the desktop's because its *memory* is faster).
 Protocols vary slightly across rows — the [benchmark sections](#benchmark-core-ultra-7-258v-arc-140v-16-gb--laptop-lpddr5x)
 have the methodology; treat cells as ±10%. Every cell uses the `count 1-100`
 test as its steady-state metric — decode falls as a generation lengthens (KV reads
-grow with context), so a figure without its test is not reproducible. The dGPU
-column was measured 2026-08-18 with a corrected harness; the older rows read a
-few percent high on decode, and **TTFT figures measured on Windows before then
-can carry a fixed ~2 s loopback penalty** that has since been removed, so do not
-compare TTFT across rows until they are re-measured. For scale: an RTX 5090 does 197
+grow with context), so a figure without its test is not reproducible.
+
+Decode figures here are stable across harness generations: re-measured 2026-08-18
+on the same 285K and the same OpenVINO 2026.1, SmolLM3 came back 29.4 against
+29.7 and Qwen3-8B 14.6 against 15.4 — inside the ±10% already claimed. **TTFT
+figures published before 2026-08-18 are not**: on that same cell TTFT measured
+4.01 s then and 0.21 s now, because the old figure carried a fixed Windows
+loopback delay plus ~20 tokens of generation counted as prefill. Treat any
+pre-2026-08-18 TTFT number in this README as unusable, decode numbers as sound. For scale: an RTX 5090 does 197
 tok/s on the same 8B via Ollama — the [desktop benchmark](#benchmark-core-ultra-9-285k-rtx-5090--desktop-ddr5)
 explains why NoLlama doesn't compete there.
 
@@ -444,10 +448,18 @@ the `count 1-100` test as the steady-state decode metric.
 |---|---|---|
 | **Decode tok/s** (count 1-100) | **21.7** | 13.4 |
 | Decode tok/s (2+2, thinking) | 18.6 | 11.2 |
-| TTFT (prefill) | 3.2s | **1.85s** |
+| TTFT (prefill) | 3.2s ⚠ | 1.85s ⚠ |
 
-**NoLlama's OpenVINO GPU path is ~1.6× faster on decode**; Ollama wins
-time-to-first-token. Two caveats that matter in practice:
+⚠ **Both TTFT figures are unreliable and neither side wins on them.** They came
+from a harness that counted a fixed loopback delay plus the first ~20 generated
+tokens as prefill. Re-measured on the desktop iGPU (2026-08-18, same OpenVINO),
+NoLlama's TTFT on this class of model is **~0.2 s, not 3-4 s** — a 19×
+difference. Ollama's number went through the same harness and has not been
+re-measured, so the honest position is that this row says nothing until both
+sides are redone. The decode row is unaffected and reproduces.
+
+**NoLlama's OpenVINO GPU path is ~1.6× faster on decode.** Two caveats that
+matter in practice:
 
 - **Ollama drops the iGPU by default** — it needs `OLLAMA_IGPU_ENABLE=1`,
   or it silently runs on CPU. The out-of-the-box Ollama experience on
@@ -485,9 +497,12 @@ python benchmark.py --label cpu --runs 3 --llm-only
 python benchmark.py --backend ollama --model qwen3:8b --label rtx5090 --runs 3 --llm-only
 ```
 
-**Decode throughput, count-1-100 test:**
+**Decode throughput, count-1-100 test.** The TTFT column below predates the
+2026-08-18 harness fix and is not usable — the same iGPU cell measures 0.21 s
+today against the 4.01 s printed here. Decode is sound; read TTFT as "not yet
+re-measured", not as a result.
 
-| Backend | Device | TTFT | Decode tok/s | Speed vs CPU |
+| Backend | Device | TTFT ⚠ | Decode tok/s | Speed vs CPU |
 |---|---|---|---|---|
 | Ollama (GGUF/CUDA) | RTX 5090 | 0.19s | 197 | 11.1× |
 | NoLlama (OpenVINO) | CPU (8P + 16E @ DDR5) | 3.84s | 17.8 | 1.0× |
@@ -504,9 +519,10 @@ python benchmark.py --backend ollama --model qwen3:8b --label rtx5090 --runs 3 -
 - **NPU is the slowest Intel device on desktop**, opposite of the laptop
   story. NPU's value is power efficiency (laptop on battery), not
   throughput on mains.
-- **Prefill scales differently than decode.** RTX 5090's TTFT advantage
-  over NPU is ~55× (0.19s vs 10.6s); its decode advantage is ~20×.
-  Long prompts amplify the gap.
+- ~~**Prefill scales differently than decode.** RTX 5090's TTFT advantage
+  over NPU is ~55× (0.19s vs 10.6s)~~ — withdrawn: the NoLlama side of that
+  ratio was measurement artefact (see the warning above). The decode advantage
+  (~20×) stands. Whether prefill really scales differently here is untested.
 - **The dGPU dominates** — if you have one, use it. NoLlama's CPU
   fallback is good for "Intel-only laptop on battery", not for
   competing with a discrete card.
