@@ -6,6 +6,11 @@ rem  Double-click this file. It checks for the two things the real installer
 rem  (install.ps1) needs -- PowerShell 7 and Python 3.10+ -- offers to install
 rem  whatever is missing via winget, then hands off to install.ps1.
 rem
+rem  Any arguments are passed straight through, so the installer's flags work
+rem  from a cmd prompt without touching execution policy:
+rem      install-windows.bat -Nightly
+rem      install-windows.bat -SkipModel
+rem
 rem  Why this file exists: Windows 10/11 ship PowerShell 5.1, which cannot run
 rem  install.ps1 (#requires -Version 7.0), and scripts extracted from a
 rem  downloaded ZIP are blocked by execution policy. A .bat has neither
@@ -79,10 +84,14 @@ if not defined PYOK (
 echo  [+] Python 3.10+ found.
 
 rem --- 3. Hand off to the real installer ------------------------------------
+rem %* forwards our arguments to install.ps1. With -File, anything after the
+rem script path becomes the script's own parameters, so 'install-windows.bat
+rem -Nightly' reaches install.ps1 as -Nightly. Empty on a double-click, which
+rem is the normal path.
 echo.
 echo  Handing off to install.ps1 ^(device detection + model menu^)...
 echo.
-"%PWSH%" -NoLogo -ExecutionPolicy Bypass -File "%~dp0install.ps1"
+"%PWSH%" -NoLogo -ExecutionPolicy Bypass -File "%~dp0install.ps1" %*
 if errorlevel 1 goto :fail
 
 rem --- 4. Offer to start the server -----------------------------------------
