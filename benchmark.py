@@ -202,6 +202,14 @@ def make_llm_test(name, prompt, no_think=False, max_tokens=4096, force_no_stream
             "messages": messages,
             "stream": not force_no_stream,
             "max_tokens": max_tokens,
+            # Send temperature explicitly. Omitting it lets each server apply
+            # its OWN default, which is not the same default: NoLlama treats a
+            # missing temperature as 0.0 (greedy), Ollama uses 0.8 (sampling).
+            # Measured on Ollama qwen3:8b — without this, two identical
+            # requests returned 1871 and 1052 completion tokens; with it, 1755
+            # both times. Comparing a sampled backend against a greedy one and
+            # averaging the result is not a comparison.
+            "temperature": 0,
         }
         if force_no_stream:
             return non_stream_request(url, body)
