@@ -5,16 +5,17 @@ the docs — this file is only what's still open.
 
 ## Open
 
-- **Ask mikestahili (issue #29) for the Xe3/B390 iGPU Glimmer run — now
-  unblocked.** The Glimmer→GenAI reroute shipped AND was verified end-to-end
-  through NoLlama's serving path on the B60 (2026-08-18, nightly runtime,
-  Intel's export): loads as a plain VLM on GPU, greedy answers correct,
-  `<think>` framed on both the non-streaming and streaming OpenAI surfaces,
-  no channel-routing leak, 18.5 tok/s decode (vs 8–11 on optimum). Every
+- **Waiting on mikestahili's Xe3/B390 iGPU Glimmer run.** Asked 2026-08-18
+  (issue #29, with the exact recipe: `git pull`, `install.ps1 -Nightly`,
+  Intel's export, `venv-nightly` NOT `venv-optimum`, `--device GPU`). The
+  Glimmer→GenAI reroute shipped AND was verified end-to-end through
+  NoLlama's serving path on the B60 (2026-08-18, nightly runtime, Intel's
+  export): loads as a plain VLM on GPU, greedy answers correct, `<think>`
+  framed on both the non-streaming and streaming OpenAI surfaces, no
+  channel-routing leak, 18.5 tok/s decode (vs 8–11 on optimum). Every
   previous Glimmer GPU result came from the optimum path, where all four
   Intel GPU classes corrupted — Glimmer-on-GenAI on an *integrated* GPU is
-  the datapoint worth having. His recipe: `git pull`, `install.ps1 -Nightly`,
-  download `OpenVINO/Muse-Glimmer-30B-int4-ov`, `--device GPU`.
+  the datapoint worth having.
 
   How the reroute works — by not existing: `muse_glimmer` is simply **out of
   `NEEDS_OPTIMUM`** (only `nemotron_h` remains). Every Glimmer export in
