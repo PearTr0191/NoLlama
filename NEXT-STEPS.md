@@ -96,7 +96,7 @@ the docs — this file is only what's still open.
   standalone repro. (Track: Intel has historically fixed our reports
   within a day.)
 
-- **USM OOM: repro'd standalone, mechanism identified — issue draft ready.**
+- **USM OOM: filed upstream as openvino.genai#4344 (2026-08-18).**
   Raw VLMPipeline (plain, no scheduler_config), Glimmer int4 on the B60:
   first ~33k-token generate fails with a USM Device allocation error;
   identical retry succeeds. 100% reproducible, with or without short
