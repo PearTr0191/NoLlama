@@ -122,19 +122,25 @@ def is_vlm(model_dir):
         return False
 
 
-# Architectures openvino_genai pipelines cannot run — muse_glimmer's language
-# model takes inputs_embeds (no LLMPipeline path) and VLMPipeline lacks the
-# arch; nemotron_h is hybrid Mamba2+MoE. These are served through
-# optimum-intel's python runtime (OptimumSlot) instead.
-NEEDS_OPTIMUM = {"muse_glimmer", "nemotron_h"}
+# Architectures openvino_genai pipelines cannot run — nemotron_h is hybrid
+# Mamba2+MoE with no GenAI path. Served through optimum-intel's python
+# runtime (OptimumSlot) instead. muse_glimmer left this set on 2026-08-18:
+# every Glimmer export in existence (Intel's official one and ours) is
+# VLM-shaped, and VLMPipeline feeds its language model from embeddings by
+# design — the "takes inputs_embeds" problem only ever ruled out
+# LLMPipeline. So Glimmer is served as a plain VLM (verified on the 2026.4
+# GenAI nightly, B60 2026-08-18, ~14 tok/s vs 8-11 on optimum). If an
+# LLM-shaped Glimmer export ever appears, put it back; meanwhile
+# --backend optimum still forces the python runtime for any model.
+NEEDS_OPTIMUM = {"nemotron_h"}
 
 
 def needs_optimum(model_dir):
     """True when this model must run on the optimum-intel python backend.
 
     Reads the *top-level* model_type deliberately (not _text_config): for a
-    VLM-shaped export like Muse Glimmer, the top-level type is the one that
-    names the architecture GenAI would have to support.
+    VLM-shaped export, the top-level type is the one that names the
+    architecture GenAI would have to support.
     """
     try:
         with open(os.path.join(model_dir, "config.json")) as f:
@@ -1193,6 +1199,7 @@ class DeviceSlot:
         self.prewarmed = False           # did _prewarm_slot succeed for this load
         self.supports_prefix_cache = True  # GenAI CB backend can prefix-cache; OptimumSlot can't
         self.kv_pool_gb = 0              # resolved KV pool for THIS slot (_resolve_kv_pool)
+        self._atem = False               # Muse Glimmer channel stream needs translating
 
     def load(self, model_dir):
         """Load model, auto-detecting VLM vs LLM."""
@@ -1201,6 +1208,14 @@ class DeviceSlot:
         self.model_name = model_display_name(model_dir)
         vlm = is_vlm(model_dir)
         self.model_type = "vlm" if vlm else "llm"
+        # Muse Glimmer emits harmony-style channel routing; the GenAI pipeline
+        # strips the special tokens, so what reaches the streamer is plain-text
+        # routing words — _AtemPlainFilter translates them.
+        try:
+            with open(os.path.join(model_dir, "config.json")) as f:
+                self._atem = json.load(f).get("model_type") == "muse_glimmer"
+        except Exception:
+            self._atem = False
 
         print(f"  [{self.device_name}] Detected: {self.model_type.upper()} ({self.model_name})")
         integrity_err = _verify_weights_integrity(model_dir)
@@ -1398,7 +1413,11 @@ class DeviceSlot:
                     prompt=text_prompt, generation_config=gen,
                 )
             self.last_used = time.time()
-        return extract_text(result)
+        text = extract_text(result)
+        if self._atem:
+            atem = _AtemPlainFilter()
+            text = atem.feed(text) + atem.close()
+        return text
 
     def generate_llm(self, raw_messages, gen):
         """LLM generate — non-streaming."""
@@ -1516,6 +1535,8 @@ class DeviceSlot:
         t = threading.Thread(target=_generate, daemon=True)
         t.start()
 
+        atem = _AtemPlainFilter() if self._atem else None
+
         try:
             chunk = {
                 "id": completion_id, "object": "chat.completion.chunk",
@@ -1532,12 +1553,26 @@ class DeviceSlot:
                 if token is None:
                     break
                 token_count += 1
+                if atem:
+                    token = atem.feed(token)
+                    if not token:
+                        continue  # swallowed into a channel header / held tail
                 chunk = {
                     "id": completion_id, "object": "chat.completion.chunk",
                     "created": created, "model": self.model_name,
                     "choices": [{"index": 0, "delta": {"content": token}, "finish_reason": None}],
                 }
                 yield f"data: {json.dumps(chunk)}\n\n"
+
+            if atem:
+                tail = atem.close()
+                if tail:
+                    chunk = {
+                        "id": completion_id, "object": "chat.completion.chunk",
+                        "created": created, "model": self.model_name,
+                        "choices": [{"index": 0, "delta": {"content": tail}, "finish_reason": None}],
+                    }
+                    yield f"data: {json.dumps(chunk)}\n\n"
 
             was_cancelled = self._cancel.is_set()
             if gen_error[0] is not None:
@@ -1744,6 +1779,86 @@ class _AtemStreamFilter:
         return rest
 
 
+class _AtemPlainFilter:
+    """ATEM channel translator for the GenAI path, where the markers are gone.
+
+    VLMPipeline strips special tokens when decoding (GenerationConfig has no
+    skip_special_tokens; only Tokenizer.decode takes one, and the pipeline
+    doesn't expose it), so unlike _AtemStreamFilter there is no <|start|> or
+    <|message|> to key on. What survives of Muse Glimmer's channel framing is
+    the routing the model emits as ordinary text: generation begins mid-header
+    (the prompt ends with '<|start|>assistant'), so the stream opens with
+    'to=self' glued straight onto the reasoning, and the channel switch
+    arrives as 'assistant to=user' glued onto the answer — the <|eom|><|start|>
+    pair between them detokenizes to nothing. Shape verified against real
+    VLMPipeline output (B60, 2026-08-18).
+
+    Same surface as _AtemStreamFilter: to=self content -> <think>...</think>,
+    to=user -> plain text; ATEM XML tool calls are ordinary text and pass
+    through to parse_tool_calls. Necessarily more fragile than the marker
+    filter — 'assistant to=user' could legitimately occur inside reasoning
+    content — but the alternative is raw channel soup in every client.
+    """
+
+    _OPENERS = ("to=self", "to=user")
+    _SWITCH = "assistant to=user"
+
+    def __init__(self):
+        self._buf = ""
+        self._state = "header"  # header -> think | answer
+
+    def _held_tail(self):
+        """Length of the buffer tail that could be the start of the switch."""
+        for ln in range(min(len(self._buf), len(self._SWITCH) - 1), 0, -1):
+            if self._SWITCH.startswith(self._buf[-ln:]):
+                return ln
+        return 0
+
+    def feed(self, text):
+        self._buf += text
+        out = []
+        while self._buf:
+            if self._state == "header":
+                lead = self._buf.lstrip()
+                opener = next((o for o in self._OPENERS if lead.startswith(o)), None)
+                if opener:
+                    self._buf = lead[len(opener):]
+                    if opener == "to=self":
+                        out.append("<think>")
+                        self._state = "think"
+                    else:
+                        self._state = "answer"
+                    continue
+                if not lead or any(o.startswith(lead) for o in self._OPENERS):
+                    break  # could still grow into a channel header — hold
+                self._state = "answer"  # no header at all — pass through
+                continue
+            if self._state == "think":
+                i = self._buf.find(self._SWITCH)
+                if i >= 0:
+                    out.append(self._buf[:i] + "</think>\n")
+                    self._buf = self._buf[i + len(self._SWITCH):]
+                    self._state = "answer"
+                    continue
+                held = self._held_tail()
+                emit = self._buf[:-held] if held else self._buf
+                self._buf = self._buf[-held:] if held else ""
+                if emit:
+                    out.append(emit)
+                break
+            out.append(self._buf)  # answer: pass through
+            self._buf = ""
+        return "".join(out)
+
+    def close(self):
+        """Flush whatever remains (stream ended mid-channel)."""
+        rest, self._buf = self._buf, ""
+        if self._state == "think":
+            self._state = "answer"
+            return rest + "</think>\n"
+        return rest
+
+
 _HF_PENALTY_NOTED = [False]
 
 
@@ -1768,8 +1883,10 @@ def _hf_gen_kwargs(gen):
 class OptimumSlot(DeviceSlot):
     """One model served through optimum-intel's python runtime instead of an
     openvino_genai pipeline — for the NEEDS_OPTIMUM architectures GenAI can't
-    run: muse_glimmer's language model takes inputs_embeds (no LLMPipeline
-    path, and VLMPipeline lacks the arch); nemotron_h is hybrid Mamba2+MoE.
+    run (nemotron_h: hybrid Mamba2+MoE), and for anything forced here with
+    --backend optimum. Muse Glimmer lived here until Intel's VLM-shaped
+    export moved it to the GenAI path (2026-08-18); this slot remains its
+    fallback on release runtimes whose VLMPipeline lacks the arch.
 
     TEXT-ONLY for now: model_type reports "llm" even for a VLM-shaped export
     like Muse Glimmer, so the routes reject images with a clean 400 and hand

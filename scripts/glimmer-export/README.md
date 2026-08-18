@@ -1,5 +1,15 @@
 # Muse Glimmer → OpenVINO int4 export
 
+> **SUPERSEDED (2026-08-18).** Intel now publishes an official export —
+> [`OpenVINO/Muse-Glimmer-30B-int4-ov`](https://huggingface.co/OpenVINO/Muse-Glimmer-30B-int4-ov)
+> (2026-08-12) — which is VLM-shaped and runs on GenAI's `VLMPipeline`
+> (verified B60, 2026-08-18, ~14 tok/s). Download that instead of running
+> these scripts. This directory stays because it records the working
+> export recipe and the RAM-bound conversion lesson (60 GB BF16 through
+> host RAM), and because our published export
+> ([`aweussom/Muse-Glimmer-30B-int4-ov`](https://huggingface.co/aweussom/Muse-Glimmer-30B-int4-ov))
+> is the repro model named in openvino#37419.
+
 Meta's Muse Glimmer 30B (best-in-class local agent model) has upstream OpenVINO
 export support since optimum-intel PR #1924 (merged 2026-08-11) — tracked in
 our issue huggingface/optimum-intel#1927. These scripts run that recipe.

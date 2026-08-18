@@ -1,9 +1,15 @@
 #requires -Version 7.0
 <#
 Set up the python venv for NoLlama's optimum backend — the runtime for
-brand-new architectures that openvino_genai cannot serve yet (Muse Glimmer;
-see README "Brand-new architectures"). Serving only: for EXPORTING such a
-model see scripts\glimmer-export\.
+brand-new architectures that openvino_genai cannot serve yet (see
+docs\MODELS.md "Brand-new architectures"). Serving only: for EXPORTING such
+a model see scripts\glimmer-export\.
+
+Note (2026-08-18): Muse Glimmer no longer needs this — its VLM-shaped
+exports auto-route to the GenAI path (nightly runtime until 2026.4
+releases). This venv remains the path for nemotron_h-class LLM-shaped
+architectures, and the '--backend optimum' fallback for Glimmer, which now
+requires that flag explicitly (auto-detection picks GenAI).
 
 What lands in the venv, and why this exact order:
   - openvino + openvino-genai + flask + pillow: NoLlama's normal serving deps
@@ -26,9 +32,10 @@ release one intact. That is the setup for re-testing the GPU corruption
 control that produced the previous verdict, so upgrading it in place would
 destroy the comparison. Pin -OptimumIntelRef/-TransformersRef to whatever the
 control venv holds ('pip show optimum-intel') so OpenVINO is the only variable.
-Then serve with it:
-  Windows: venv-optimum\Scripts\python.exe nollama.py --model-dir <dir> --device CPU
-  Linux:   venv-optimum/bin/python nollama.py --model-dir <dir> --device CPU
+Then serve with it (--backend optimum: Glimmer's VLM-shaped export would
+otherwise auto-route to GenAI, which this venv's release runtime can't run):
+  Windows: venv-optimum\Scripts\python.exe nollama.py --model-dir <dir> --backend optimum --device CPU
+  Linux:   venv-optimum/bin/python nollama.py --model-dir <dir> --backend optimum --device CPU
 #>
 param(
     [string]$Python = 'python',

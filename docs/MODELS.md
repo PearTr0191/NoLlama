@@ -220,21 +220,50 @@ The point: 1.5B parameter models are for testing the plumbing, not
 for geography. Use Qwen3-8B or larger for actual chat. The small
 models will catch up — they're getting smarter every month.
 
+## Muse Glimmer: now on the GenAI path
+
+Muse Glimmer graduated off the optimum backend on 2026-08-18. Intel
+published an official **VLM-shaped** export —
+[`OpenVINO/Muse-Glimmer-30B-int4-ov`](https://huggingface.co/OpenVINO/Muse-Glimmer-30B-int4-ov)
+(2026-08-12, 17 GB, INT4_ASYM g64) — and a VLM-shaped export runs on
+GenAI's `VLMPipeline`, which feeds the language model from embeddings by
+design. NoLlama routes any VLM-shaped `muse_glimmer` export there
+automatically (our own
+[`aweussom/Muse-Glimmer-30B-int4-ov`](https://huggingface.co/aweussom/Muse-Glimmer-30B-int4-ov)
+is VLM-shaped too and reroutes the same way — it is **superseded** by
+Intel's, staying published as the repro for openvino#37419). Verified raw
+on the Arc Pro B60 (2026-08-18): loads, quotes the instruction back
+verbatim, ~14 tok/s against 8–11 on the optimum path — and the GPU
+corruption story below **never applied to the GenAI path**. Glimmer's ATEM
+reasoning channels are translated to `<think>` blocks on this path too
+(plain-text translation — the pipeline strips the channel markers).
+
+What to know before switching:
+
+- Needs the **nightly runtime** (`install.ps1 -Nightly`) until OpenVINO
+  2026.4 ships as a release — Intel exported it with a 2026.4 build and the
+  card wants 2026.3.1+ with a genai pre-release. Same gate as Qwen3.8-27B.
+- It lands on a **VLM slot**: no prefix cache / prewarm, and tool calls are
+  **not parsed into structured `tool_calls`** (they pass through as text) —
+  the optimum path did parse them. Images are untested on Glimmer.
+- `--backend optimum` still forces the old path (needs `venv-optimum/`).
+
 ## Brand-new architectures: the optimum backend
 
 Some architectures land in optimum-intel (export) before openvino_genai
-(serving) learns to run them — as of 2026-08 that's **Meta Muse Glimmer**
-(`muse_glimmer`, [our int4 export](https://huggingface.co/aweussom/Muse-Glimmer-30B-int4-ov))
-and **NVIDIA Nemotron 3.5 Lightning** (`nemotron_h`). NoLlama serves these
-through optimum-intel's python runtime instead: detection is automatic
-(`--scan` shows a `Backend` line; `--backend` overrides), tool calling
-works, and both API surfaces behave identically. Differences from GenAI
-slots: **text-only for now** (images get a clean 400), no prefix cache /
-prewarm (a GenAI feature), no `--offload-ratio`, and no NPU. GPU support
-also depends on the OpenVINO GPU plugin executing the model's
+(serving) learns to run them — as of 2026-08 that's **NVIDIA Nemotron 3.5
+Lightning** (`nemotron_h`); Muse Glimmer lived here until Intel's official
+export (above), and its history fills the rest of this section. NoLlama
+serves these through optimum-intel's python runtime instead: detection is
+automatic (`--scan` shows a `Backend` line; `--backend` overrides), tool
+calling works, and both API surfaces behave identically. Differences from
+GenAI slots: **text-only for now** (images get a clean 400), no prefix
+cache / prewarm (a GenAI feature), no `--offload-ratio`, and no NPU. GPU
+support also depends on the OpenVINO GPU plugin executing the model's
 dynamic-shape graph. On OpenVINO **2026.3 and earlier, no Intel GPU runs
-Glimmer correctly — integrated or discrete** — so on a release runtime, use
-`--device CPU`. **Fixed in 2026.4** (verified on the nightly, see below):
+Glimmer correctly on this backend — integrated or discrete** — so on a
+release runtime, use `--device CPU`. **Fixed in 2026.4** (verified on the
+nightly, see below):
 
 - **2026.4.0.dev20260814** (Arc Pro B60, 2026-08-15): the issue's own repro
   script now quotes the prompt **verbatim** on GPU and reasons coherently to
@@ -311,19 +340,22 @@ transformers goes in last to override it:
 
 ```powershell
 .\install-optimum.ps1
-venv-optimum\Scripts\python.exe nollama.py --model-dir ~\models\Muse-Glimmer-30B-int4-ov --device CPU --idle-timeout 0
+venv-optimum\Scripts\python.exe nollama.py --model-dir ~\models\Muse-Glimmer-30B-int4-ov --backend optimum --device CPU --idle-timeout 0
 ```
 
-(`--device CPU` is deliberate — see the iGPU verdicts above. If upstream
-main breaks, pin with `-TransformersRef <commit>` / `-OptimumIntelRef
-<commit>`.)
+(`--device CPU` is deliberate — see the iGPU verdicts above. `--backend
+optimum` is now required for Glimmer: auto-detection routes its VLM-shaped
+export to the GenAI path, which this venv's release runtime can't run. If
+upstream main breaks, pin with `-TransformersRef <commit>` /
+`-OptimumIntelRef <commit>`.)
 
 Running a plain install against such a model exits immediately with an
 error naming this section instead of failing minutes into the load. When
 openvino_genai gains these architectures, `--backend genai` (or just
 re-exporting) moves them onto the faster path with prefix caching.
 
-Measured (Muse Glimmer 30B int4, short chat prompts, 2026-08-13):
+Measured on this backend (Muse Glimmer 30B int4, short chat prompts,
+2026-08-13 — historical; Glimmer's current path is GenAI, see above):
 Core Ultra 7 258V laptop CPU 1.4 tok/s / TTFT 12.9 s; Core Ultra 9 285K
 desktop CPU 2.6 tok/s / TTFT 9.6 s. Dense-30B bandwidth physics — fine
 for verification, not agent loops; a 24 GB Arc-class card is the real

@@ -5,53 +5,53 @@ the docs — this file is only what's still open.
 
 ## Open
 
-- **Glimmer runs on the GenAI path now — reroute it.** Intel published an
-  official OpenVINO export on 2026-08-12
-  (`OpenVINO/Muse-Glimmer-30B-int4-ov`, 17 GB, INT4_ASYM g64) and it is
-  **VLM-shaped**: separate vision / text / language IRs. Verified 2026-08-18 on
-  the B60 via `openvino_genai.VLMPipeline` on **GPU**: loads, quotes the
-  instruction back verbatim, answers 2+2 correctly, ~14 tok/s (against 8-11 on
-  the optimum path). No optimum backend, no transformers-from-git, and the
-  optimum-path GPU corruption never applied to GenAI.
+- **Ask mikestahili (issue #29) for the Xe3/B390 iGPU Glimmer run — now
+  unblocked.** The Glimmer→GenAI reroute shipped AND was verified end-to-end
+  through NoLlama's serving path on the B60 (2026-08-18, nightly runtime,
+  Intel's export): loads as a plain VLM on GPU, greedy answers correct,
+  `<think>` framed on both the non-streaming and streaming OpenAI surfaces,
+  no channel-routing leak, 18.5 tok/s decode (vs 8–11 on optimum). Every
+  previous Glimmer GPU result came from the optimum path, where all four
+  Intel GPU classes corrupted — Glimmer-on-GenAI on an *integrated* GPU is
+  the datapoint worth having. His recipe: `git pull`, `install.ps1 -Nightly`,
+  download `OpenVINO/Muse-Glimmer-30B-int4-ov`, `--device GPU`.
 
-  `NEEDS_OPTIMUM = {"muse_glimmer", "nemotron_h"}` (nollama.py:129) now blocks
-  this. Its stated reason — *"muse_glimmer's language model takes inputs_embeds
-  (no LLMPipeline)"* — is an argument about **LLMPipeline**; a VLM-shaped export
-  goes to **VLMPipeline**, which feeds a language model from embeddings by
-  design. Fix is structural, not a special case: **`is_vlm` should override the
-  architecture blocklist**, which keeps our own LLM-shaped export on optimum
-  where it belongs.
+  How the reroute works — by not existing: `muse_glimmer` is simply **out of
+  `NEEDS_OPTIMUM`** (only `nemotron_h` remains). Every Glimmer export in
+  existence (Intel's and ours) is VLM-shaped, so Glimmer is served as a
+  plain VLM, no special routing at all. The one Glimmer-specific piece is
+  `_AtemPlainFilter`: it translates the channel routing that survives
+  detokenisation (`to=self` glued onto reasoning, `assistant to=user` glued
+  onto the answer) into `<think>` blocks on both `generate_vlm` and
+  `stream_vlm`. That part is irreducible app-side work — the model emits
+  channels as text and the pipeline strips the markers; vLLM/TGI would have
+  to do the same. Unit-tested against every chunk split, plus the live run
+  above.
 
-  **This blocks the community Xe3 test.** mikestahili offered (issue #29) to
-  run things on a Core Ultra X7 358H / Arc B390 with 64 GB. Glimmer-on-GenAI on
-  an *integrated* GPU is the datapoint worth having — every previous Glimmer
-  GPU result came from the optimum path, where all four Intel GPU classes
-  corrupted. But until the reroute ships he would be driving raw
-  `openvino_genai` scripts, which tests Intel's export rather than NoLlama.
-  Ship the reroute first, then ask. Don't leave the offer hanging in the
-  meantime.
+  Corrections to what this file used to claim: our own export
+  (`aweussom/Muse-Glimmer-30B-int4-ov`) is **VLM-shaped too**
+  (`openvino_vision_embeddings_model.xml` is right there), so the earlier
+  "is_vlm overrides the blocklist, keeping our LLM-shaped export on optimum"
+  plan protected nothing — dropping the set entry is equivalent and simpler.
+  On a release runtime, where VLMPipeline lacks the arch, Glimmer now
+  **fails at load** instead of limping along on optimum — docs say so, and
+  `--backend optimum` (from `venv-optimum/`) is the escape hatch. MODELS.md's
+  example command gained that flag.
 
   Still needs the nightly runtime — Intel exported it with a
   `2026.4.0-...-muse_onyx` build and the card wants 2026.3.1+ with a genai
-  pre-release. So Glimmer's stack gate becomes **"2026.4 ships stable"** rather
-  than "muse_glimmer in released transformers", which is the same gate Qwen3.8
-  is already waiting on. Note VLM slots get no prefix cache (the CB backend is
-  LLM-only), so that win does not arrive with this.
+  pre-release. So Glimmer's stack gate becomes **"2026.4 ships stable"**,
+  the same gate Qwen3.8 is already waiting on. VLM slots get no prefix
+  cache (the CB backend is LLM-only), so that win does not arrive with this.
 
-- **The ATEM filter cannot simply be ported to the GenAI path.**
-  `_AtemStreamFilter` keys on `<|start|>`, `<|message|>`, `<|eom|>`, `<|eot|>`.
-  `VLMPipeline.generate()` strips special tokens and `GenerationConfig` has no
-  `skip_special_tokens` (only `Tokenizer.decode` does, which the pipeline does
-  not expose). What survives is the plain-text routing — `to=self`,
-  `assistant to=user` — so a GenAI-path filter has to parse bare words that
-  could legitimately appear in content. More fragile than the existing one.
-  Gate it on the flag that already exists (`model_type == "muse_glimmer"`,
-  nollama.py:1881) rather than adding a second one.
-
-  This is not an Intel bug: stripping special tokens is correct detokenisation,
-  and the routing words are plain text the model emitted. Serving a
-  harmony-channel model is the application's job — vLLM and TGI would show the
-  same thing.
+- **Glimmer lost structured tool calling in the reroute.** On the optimum
+  path Glimmer was `model_type="llm"` and tool turns went through
+  `parse_tool_calls`; on GenAI it is a VLM slot, and the VLM branch of
+  `chat_completions` streams text without ever parsing tool calls — the ATEM
+  XML now reaches the client raw. That's a pre-existing gap for *all* VLM
+  slots (Qwen3-VL has it too), Glimmer just makes it visible because it's an
+  agent model. Fix is "parse tool calls on the VLM path", a separate feature;
+  until then agent use of Glimmer arguably still wants `--backend optimum`.
 
 - **Loading a big model stages through host memory first.** Watched on the B60
   (17 GB Glimmer): shared GPU memory ramps to near its 16 GB ceiling and holds
@@ -66,12 +66,14 @@ the docs — this file is only what's still open.
   that has to be deleted by hand (17 GB of files, 28.7 GB on disk until then).
 
 - **Glimmer into `install.ps1`/`models.json`: waits for OpenVINO 2026.4 as a
-  *release*.** Standing rule: leading edge, not bleeding edge. The device gate
-  closed on the 2026.4 nightly (GPU output correct, 8-11 tok/s), but a menu item
-  that needs a nightly wheel is bleeding. The stack gate is still shut too —
-  `muse_glimmer` isn't in released transformers/optimum-intel, so
-  `install-optimum.ps1` remains the honest path. Docs may say we know it will
-  work; the installer may not act on it.
+  *release*.** Standing rule: leading edge, not bleeding edge. The GenAI
+  reroute works on the 2026.4 nightly, but a menu item that needs a nightly
+  wheel is bleeding. When 2026.4 releases, the entry is Intel's
+  `OpenVINO/Muse-Glimmer-30B-int4-ov` with `"requires_nightly"` dropped —
+  the manual path until then is `install.ps1 -Nightly` plus a hand
+  download (`install-optimum.ps1` is no longer the recommended Glimmer
+  path, only the `--backend optimum` fallback). Docs may say we know it
+  will work; the installer may not act on it.
 - **`transformers` main breaks the optimum backend's text-only path.**
   `5.16.0.dev0` calls `get_experts_implementation()` from
   `_optimize_model_for_decode()`; `OVModelForCausalLM` doesn't implement it, so
