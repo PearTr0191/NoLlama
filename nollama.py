@@ -3084,7 +3084,7 @@ def ollama_v1_chat_completions():
 # ---------------------------------------------------------------------------
 
 class _ExclusiveThreadedWSGIServer(ThreadedWSGIServer):
-    """Prevent another Windows process from sharing any address on the port."""
+    """Exclusive on the port, and listening on IPv4 *and* IPv6."""
 
     def server_bind(self):
         if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
@@ -3094,11 +3094,30 @@ class _ExclusiveThreadedWSGIServer(ThreadedWSGIServer):
             self.socket.setsockopt(
                 socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1
             )
+        if self.socket.family == socket.AF_INET6 and hasattr(socket, "IPV6_V6ONLY"):
+            # Serve both families from one socket. This is not a nicety: on
+            # Windows getaddrinfo("localhost") returns ::1 FIRST, so against an
+            # IPv4-only listener every localhost client attempts IPv6, waits for
+            # the connect to fail, and only then falls back to 127.0.0.1.
+            # Measured on Windows 11 + Python urllib (2026-08-18, Arc B60 box):
+            # 2.05 s per request via localhost vs 0.015 s via 127.0.0.1 — a
+            # fixed ~2 s tax that looks exactly like slow prefill and hides in
+            # TTFT. start-openclaw.ps1 and the startup banner both hand out
+            # localhost URLs, so the agent path paid it on every turn.
+            self.socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
         super().server_bind()
 
 
 def _serve_app(flask_app, port):
-    server = _ExclusiveThreadedWSGIServer("0.0.0.0", port, flask_app)
+    # "::" with V6ONLY off accepts IPv4 and IPv6 alike. Fall back to IPv4-only
+    # where IPv6 is disabled outright, rather than failing to start.
+    try:
+        server = _ExclusiveThreadedWSGIServer("::", port, flask_app)
+    except OSError as e:
+        print(f"  [net] IPv6 bind failed ({e}); IPv4 only — clients using "
+              f"'localhost' may see a ~2s per-request delay, use 127.0.0.1",
+              flush=True)
+        server = _ExclusiveThreadedWSGIServer("0.0.0.0", port, flask_app)
     try:
         server.serve_forever()
     finally:
