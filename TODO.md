@@ -1,6 +1,6 @@
 # TODO
 
-## v0.9.1: shim fixes from the fresh-Ryzen first-contact test (2026-08-11)
+## Shim fixes from the fresh-Ryzen first-contact test (2026-08-11, still open)
 
 Live test of install-windows.bat on a fresh Win11 box (Ryzen 5950X/RX580):
 pwsh prompt, winget install, Store-stub detection and both re-run paths all

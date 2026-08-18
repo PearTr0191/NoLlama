@@ -15,7 +15,12 @@ Usage:
     python nollama.py --scan                                 # what models do I have?
 """
 
-__version__ = "0.9.0"
+# Date-based, because semver invites arguments about whether a fix is "minor"
+# and tells a user nothing about what code they actually have. A git checkout
+# also reports its short commit (see _version_string below), so a bug report
+# names the exact tree. Nothing parses this: the version VS Code's Ollama client
+# validates is a separate faked one on /api/version.
+__version_date__ = "2026-08-18"
 
 import argparse
 import base64
@@ -28,6 +33,28 @@ import re
 import socket
 import sys
 import time
+
+
+def _version_string():
+    """"<date>" from a release ZIP, "<date>-<commit>" from a git checkout.
+
+    Release ZIPs carry no .git, so they report the date alone. A checkout adds
+    the short commit — including local commits ahead of the tag, which is the
+    case where "0.10.0" would have been a lie.
+    """
+    try:
+        import subprocess
+        here = os.path.dirname(os.path.abspath(__file__))
+        r = subprocess.run(["git", "-C", here, "rev-parse", "--short", "HEAD"],
+                           capture_output=True, text=True, timeout=2)
+        if r.returncode == 0 and r.stdout.strip():
+            return f"{__version_date__}-{r.stdout.strip()}"
+    except Exception:
+        pass          # no git, no repo, or git is slow — the date alone is fine
+    return __version_date__
+
+
+__version__ = _version_string()
 import threading
 import uuid
 import xml.etree.ElementTree as ET
@@ -2108,7 +2135,13 @@ max_dim = 768
 debug = False
 vscode_compat = False  # report a real Ollama version so VS Code accepts us
 
-# Ollama version VS Code expects; fake but recent enough to pass its checks.
+# Ollama version reported under --vscode-compat. VS Code's Ollama client
+# validates this field and rejects anything non-numeric, so it has to look like
+# a real Ollama release; it is a shim for their check, not a claim about what we
+# are. Override with --vscode-ollama-version if VS Code raises its floor. We
+# deliberately do NOT look the current number up over the network: a local-first
+# server should not need the internet to start, and "high enough" is all this
+# has to be.
 VSCODE_OLLAMA_VERSION = "0.18.3"
 _request_counter = itertools.count(1)  # thread-safe id generator
 
@@ -2699,9 +2732,12 @@ def ollama_health():
 
 @ollama_app.route("/api/version", methods=["GET"])
 def ollama_version():
-    # VS Code's Ollama client rejects non-numeric versions, so when
-    # --vscode-compat is set we report a real Ollama version to please it.
-    version = VSCODE_OLLAMA_VERSION if vscode_compat else "nollama-0.1.0"
+    # Two callers, two answers. --vscode-compat gets a plausible Ollama version
+    # because VS Code validates the field (see VSCODE_OLLAMA_VERSION). Everyone
+    # else gets our real version, prefixed so no client mistakes us for Ollama.
+    # It used to report a hardcoded "nollama-0.1.0" here, which stopped being
+    # true a long time ago.
+    version = VSCODE_OLLAMA_VERSION if vscode_compat else f"nollama-{__version__}"
     return jsonify({"version": version})
 
 
@@ -3332,8 +3368,15 @@ def parse_args():
     p.add_argument("--debug", action="store_true",
                    help="Log every inbound API request (method, path, User-Agent, body)")
     p.add_argument("--vscode-compat", action="store_true",
-                   help=f"Report a real Ollama version ({VSCODE_OLLAMA_VERSION}) on "
-                        f"/api/version so VS Code's Ollama client accepts the server")
+                   help=f"Report an Ollama-shaped version ({VSCODE_OLLAMA_VERSION}) on "
+                        f"/api/version so VS Code's Ollama client accepts the server. "
+                        f"Its check rejects anything non-numeric, so our own dated "
+                        f"version will not pass it")
+    p.add_argument("--vscode-ollama-version", default=VSCODE_OLLAMA_VERSION,
+                   metavar="X.Y.Z",
+                   help=f"Version to report under --vscode-compat (default "
+                        f"{VSCODE_OLLAMA_VERSION}). Raise it if VS Code starts "
+                        f"demanding a newer Ollama")
     p.add_argument("--no-prompt-cache", action="store_true",
                    help="Disable prefix (KV) caching on GPU/CPU LLM slots. Caching is "
                         "ON by default — it prefills a repeated prompt prefix (e.g. an "
@@ -3377,6 +3420,7 @@ def parse_args():
 def main():
     global primary, secondary, whisper_slot, max_dim, debug, vscode_compat
     global PROMPT_CACHE, PROMPT_CACHE_GB, PREWARM_FILE, OFFLOAD_RATIO
+    global VSCODE_OLLAMA_VERSION
 
     args = parse_args()
 
@@ -3390,6 +3434,7 @@ def main():
     max_dim = args.max_dim
     debug = args.debug
     vscode_compat = args.vscode_compat
+    VSCODE_OLLAMA_VERSION = args.vscode_ollama_version
     PROMPT_CACHE = not args.no_prompt_cache
     PROMPT_CACHE_GB = args.cache_size_gb
     OFFLOAD_RATIO = max(0, min(99, args.offload_ratio))
