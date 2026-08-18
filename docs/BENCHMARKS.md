@@ -1,0 +1,280 @@
+# Benchmarks
+
+How to reproduce, and every measured number. Run `benchmark.py` against a
+running NoLlama (or Ollama with `--backend ollama`); it does 1 warmup + N runs
+and discards IQR outliers. The `count 1-100` test is the steady-state decode
+metric used throughout.
+
+**Cross-backend rows need care.** `benchmark.py` pins `temperature: 0` so both
+servers decode greedily — omit it and NoLlama defaults to 0.0 while Ollama
+defaults to 0.8, so one side samples. The same prompt also doesn't buy the same
+work: on `count 1-100`, NoLlama's qwen3-8b emits 293 tokens where Ollama's emits
+~1755 for an identical 291-character answer, because its build ignores
+`/no_think` and spends the rest on hidden reasoning. tok/s is still tok/s — read
+those rows as throughput, not as time to finish the task.
+
+Ollama's OpenAI-compatible `/v1/chat/completions` and its native `/api/chat`
+agree exactly once temperature is pinned (1755 tokens either way), so the
+endpoint choice isn't a variable.
+
+## Big MoE models on small GPUs (disk offload)
+
+OpenVINO 2026.3 can stream Mixture-of-Experts weights from disk instead of
+keeping them GPU-resident. NoLlama exposes it as `--offload-ratio PCT`
+(GPU slots). Measured on an Arc 140V (16 GB) laptop, Qwen3-30B-A3B INT4 —
+a 15.2 GB model that doesn't fit resident at all:
+
+| `--offload-ratio` | Resident GPU memory | Steady-state decode |
+|---|---|---|
+| 30 | 10.8 GB | **25.3 tok/s** |
+| 50 | 8.1 GB | 22.1 tok/s |
+| 90 | **2.35 GB** | 5.1 tok/s |
+
+(Steady-state, measured after the expert LRU warms up — the first ~60
+tokens run 2-5× slower while the cache fills, so don't judge offload by
+its first sentence. `scripts/offload-test.py` measures this properly.)
+
+Pick the **smallest ratio that fits** your memory. At moderate ratios this
+is genuinely interactive: 25 tok/s from a 15.2 GB model on a 16 GB-class
+laptop iGPU matches a 24-core desktop CPU running the same model resident.
+High ratios (90) trade speed for extreme footprint — batch/overnight
+territory. **Requires an XMX-capable GPU** (Arc, Lunar Lake and newer —
+`install.ps1` tells you at device detection); on iGPUs without XMX the
+feature silently does nothing, and NoLlama warns at startup instead of
+letting you believe your model got smaller.
+
+**XMX confirmed on** (`GPU_HW_MATMUL` in `OPTIMIZATION_CAPABILITIES`): Arc 140V
+iGPU, Arc Pro B60. **Not** on the desktop Xe-LPG iGPU. The flag only means
+offload will engage — not that a model fits, and nothing at all for dense
+models, which have no experts to stream.
+
+**Don't use offload on a discrete card.** It exists to run models that don't
+fit. If the model fits, every offloaded byte crosses PCIe instead of VRAM.
+Qwen3-30B-A3B on a B60 (2026-08-18): **50.8 tok/s resident, ~10.5 at
+`--offload-ratio 30`.** 5× slower, copy engine at 97%, 3.2 GB in VRAM against
+10.2 GB in host RAM, both disks idle. It streams across the bus, not from disk.
+
+That's why an iGPU does better: there the offloaded weights sit in RAM the GPU
+reads directly (~136 GB/s on LPDDR5X), no bus hop. **Memory topology decides
+this, not XMX.**
+
+Two cautions. Greedy output stopped being reproducible under offload — 87 to
+2040 tokens for the same prompt, where resident gave 478 every time. And nobody
+has compared offload against `--device CPU` on a card that *can't* fit the
+model, so don't assume offload wins there.
+
+### Where does your hardware land? (big-MoE routes, measured 2026-08)
+
+Same model family (Qwen3 MoE, A3B-class), steady-state decode, best route
+per hardware class — including a CUDA flagship for perspective. Mixed
+quants and sizes, so read it as *routes*, not a controlled A/B:
+
+| Hardware | Stack & route | Model | tok/s |
+|---|---|---|---|
+| RTX 5090 32 GB + CPU (hybrid auto-split) | Ollama/CUDA | Coder-Next Q4, 53 GB | **~73** |
+| **Arc Pro B60 24 GB dGPU, model fits resident** | NoLlama/OpenVINO | 30B-A3B int4, 15 GB | **50.8** |
+| Arc Pro B60, same model, `--offload-ratio 30` | NoLlama/OpenVINO | 30B-A3B int4, 15 GB | ~10.5 — don't |
+| Arc 140V laptop iGPU, `--offload-ratio 30` | NoLlama/OpenVINO | 30B-A3B int4, 15 GB | 25.3 |
+| 24-core desktop CPU (64 GB RAM), model fits | NoLlama/OpenVINO | 30B-A3B int4 | 23.7 |
+| 24-core desktop CPU, model **bigger than RAM** | NoLlama/OpenVINO | Coder-Next int8, **74 GB** | 9-11.5 |
+| 8-core laptop CPU (LPDDR5X) | NoLlama/OpenVINO | 30B-A3B int4 | 9.1 |
+| Non-XMX desktop iGPU | — | any big MoE | won't load |
+
+The two B60 rows differ by one flag. Offload isn't a speed feature — it's a way
+to run what otherwise won't, and on a card with room it costs 5×.
+
+Takeaways: a dedicated CUDA card is now ~1.4× the best Intel route — but
+every Intel row above is *usable*, runs on hardware you may already own,
+and two of them (offload, bigger-than-RAM CPU) were impossible before
+OpenVINO 2026.3 and the MoE era. Decode is the whole story here; on
+thinking models multiply by your patience.
+
+### Benchmark (Core Ultra 7 258V, ARC 140V 16 GB) — laptop, LPDDR5X
+
+Tested with `benchmark.py` — 1 warmup + 5 runs, outliers discarded.
+
+```powershell
+# Text-only (no images required)
+python benchmark.py --llm-only
+
+# With VLM tests — provide 4 images: two "same vehicle" + two "different"
+python benchmark.py --images-dir C:\path\to\images
+python benchmark.py --same-1 a.jpg --same-2 b.jpg --diff-1 c.jpg --diff-2 d.jpg
+```
+
+**LLM text (Qwen3 8B INT4-CW, same model on NPU and CPU):**
+
+| Test | NPU | CPU |
+|---|---|---|
+| "Say hello" (thinking) | 11.7s, 5.2 tok/s | 8.1s, 7.4 tok/s |
+| "Say hello" (no-think) | 10.6s, 4.6 tok/s | 8.6s, 7.3 tok/s |
+| "What is 2+2?" (thinking) | 11.7s, 5.3 tok/s | 9.0s, 7.0 tok/s |
+| "What is 2+2?" (no-think) | 5.5s, 0.7 tok/s | 2.7s, 1.5 tok/s |
+
+**GPU (Qwen2.5-VL 3B on ARC 140V, non-streaming):**
+
+| Test | Time |
+|---|---|
+| "Say hello" (thinking) | 2.6s |
+| "Say hello" (no-think) | 2.6s |
+| "What is 2+2?" (thinking) | 2.6s |
+| "What is 2+2?" (no-think) | 2.4s |
+| Same vehicle? (2 images) | 3.8s |
+| Different vehicles? (2 images) | 3.8s |
+
+Above benchmarks were captured before VLMPipeline gained streaming
+support (openvino-genai 2026.1). VLM now streams on Arc 140V at
+roughly 11 tok/s decode after prefill — see
+`benchmark.py --backend vlm` for fresh numbers.
+
+CPU beats NPU on throughput (~7.4 vs ~5.2 tok/s) for this model.
+GPU text is fast but runs a smaller 3B model (not directly comparable).
+VLM image responses take ~3-4s regardless of answer length.
+
+### NoLlama vs Ollama on the Arc 140V iGPU
+
+Ollama now runs on Intel iGPUs via its Vulkan backend, so this is the
+direct apples-to-apples question: **same Qwen3-8B, same 4-bit, same
+Arc 140V iGPU.** Measured 2026-06-16 with `benchmark.py` (3 runs), using
+the `count 1-100` test as the steady-state decode metric.
+
+| | NoLlama (OpenVINO INT4-CW) | Ollama 0.30.8 (Vulkan GGUF Q4) |
+|---|---|---|
+| **Decode tok/s** (count 1-100) | **21.7** | 13.4 |
+| Decode tok/s (2+2, thinking) | 18.6 | 11.2 |
+
+**NoLlama's OpenVINO GPU path is ~1.6× faster on decode.** Prefill isn't
+compared — the two were measured at different times. Two caveats that matter in
+practice:
+
+- **Ollama drops the iGPU by default** — it needs `OLLAMA_IGPU_ENABLE=1`,
+  or it silently runs on CPU. The out-of-the-box Ollama experience on
+  this laptop is *CPU*, not GPU.
+- Ollama can't use the **NPU** at all, and has no local **vision** model
+  on Intel — both are NoLlama-only.
+
+> **Roadmap note — GPU/CPU support is here to stay** *(updated 2026-08:
+> this reverses the earlier "provisional" stance)*. NoLlama's original
+> reason to exist is the Intel **NPU** (which Ollama doesn't support), and
+> the plan was to drop GPU/CPU once Ollama's Intel performance caught up.
+> That hasn't happened and isn't on the horizon: Ollama's Intel path runs
+> through a non-OpenVINO shim and remains much slower, while most real
+> NoLlama users drive coding agents (OpenClaw, Copilot) on the GPU/CPU
+> path. So GPU/CPU — and with them tool calling, prefix caching, and
+> prewarm — are supported for the foreseeable future. If you outgrow a
+> single-user local server (multi-user, production serving of 30B+
+> models), the step up is [OpenVINO Model Server](https://github.com/openvinotoolkit/model_server)
+> — same runtime underneath, built for that job.
+
+### Benchmark (Core Ultra 9 285K, RTX 5090) — desktop, DDR5
+
+Same Qwen3 8B INT4-CW model on every Intel device, plus the same model
+served via Ollama (GGUF Q4_K_M) on the RTX 5090 for context. 1 warmup +
+3 runs. The "count 1-100" test (`max_tokens=4096`, no-think) is the
+cleanest cross-stack number — long output, steady-state, no thinking confound.
+
+```powershell
+# Each NoLlama device — restart the server with --device <name> first
+python benchmark.py --label npu --runs 3 --llm-only
+python benchmark.py --label igpu --runs 3 --llm-only
+python benchmark.py --label cpu --runs 3 --llm-only
+
+# Ollama (any backend it's running on — CUDA, ROCm, CPU)
+python benchmark.py --backend ollama --model qwen3:8b --label rtx5090 --runs 3 --llm-only
+```
+
+**Decode throughput, count-1-100 test:**
+
+| Backend | Device | Decode tok/s | Speed vs CPU |
+|---|---|---|---|
+| Ollama (GGUF/CUDA) | RTX 5090 | ~230 | 12.9× |
+| NoLlama (OpenVINO) | CPU (8P + 16E @ DDR5) | 17.8 | 1.0× |
+| NoLlama (OpenVINO) | iGPU (Xe-LPG, 4 cores) | 15.4 | 0.87× |
+| NoLlama (OpenVINO) | NPU 3 (Intel AI Boost) | 10.0 | 0.56× |
+
+Prefill isn't the story here — all these devices hit first token in ~0.2 s on a
+short prompt. Long agent prompts are another matter: see
+[Agent tools](#agent-tools--coding-assistants-vs-code-copilot-openclaw).
+
+**Surprises on this hardware:**
+
+- **CPU beats iGPU.** Arrow Lake's 285K (8P + 16E at high clocks) plus
+  OpenVINO's tuned INT4 CPU kernels add up to more decode throughput
+  than the small Xe-LPG iGPU (only 4 Xe cores on the desktop part —
+  the laptop's ARC 140V has 8). Both share the same DDR5 pool, so the
+  iGPU has no bandwidth advantage, only a compute disadvantage.
+- **NPU is the slowest Intel device on desktop**, opposite of the laptop
+  story. NPU's value is power efficiency (laptop on battery), not
+  throughput on mains.
+- **It's a decode gap.** The 5090 leads the NPU ~23× on decode. Short prompts
+  reach first token fast everywhere, so what you feel is throughput.
+- **The dGPU dominates** — if you have one, use it. NoLlama's CPU
+  fallback is good for "Intel-only laptop on battery", not for
+  competing with a discrete card.
+
+**Why the desktop iGPU/NPU are slower than the laptop's:**
+LPDDR5X-8533 (laptop, ~136 GB/s) vs DDR5-6400 dual-channel (desktop,
+~100 GB/s). Decode throughput on INT4 LLMs is memory-bandwidth-bound,
+so the laptop's faster system memory closes some of the gap that
+silicon size alone would suggest. (The Core Ultra 7 258V Lunar Lake
+NPU also has more compute units than the 285K Arrow Lake NPU.)
+
+**Practical guidance:**
+
+| Hardware | Best NoLlama device |
+|---|---|
+| Intel Core Ultra laptop (Lunar Lake) | NPU (efficiency) or ARC 140V iGPU |
+| Intel Arrow Lake desktop, no dGPU | **CPU** — surprisingly best |
+| Intel + ARC discrete (A770, B580) | ARC discrete |
+| Intel + NVIDIA discrete | Use Ollama for the dGPU; NoLlama on CPU/NPU/iGPU as fallback |
+
+### Dual mode (NPU + GPU)
+
+When you have both, text requests go to the NPU (streaming) and image
+requests go to the GPU (VLM). Or put a bigger LLM on the GPU for
+smarter chat. The routing is automatic — send a request and the right
+device handles it.
+
+```
+POST /v1/chat/completions
+  "What is the capital of Norway?"  --> NPU (streaming)
+  [image + "What vehicle is this?"] --> GPU (VLM)
+```
+
+## Why not OpenVINO Model Server (OVMS)?
+
+Intel already ships OVMS — a production-grade OpenVINO inference server.
+If you're deploying LLMs in a datacenter or on Kubernetes, use OVMS.
+NoLlama is a different target: your laptop.
+
+| | OVMS | NoLlama |
+|---|---|---|
+| Target | Production, datacenter, K8s | Laptop, desktop, local |
+| Runtime | C++ | Python (Flask) |
+| OpenAI API | Yes (recent versions) | Yes |
+| Ollama API | No | **Yes** |
+| Built-in web UI | No (add OpenWebUI) | **Yes** |
+| Auto device detection | No | **Yes** |
+| Dual-device routing | One model per instance | **NPU chat + GPU vision, simultaneously** |
+| Config | JSON, manual | Zero — `install.ps1` and go |
+
+OVMS is a proper inference server. NoLlama is the thing that makes
+your Core Ultra feel like Ollama already ran on it.
+
+### ...and why not llm-scaler-vllm?
+
+Same answer, different Intel stack. [`intel/llm-scaler`](https://github.com/intel/llm-scaler)
+(vLLM + IPEX, the Battlematrix software) is Intel's official serving
+path for **Arc Pro B-series** cards — and if you're building a
+dedicated Linux inference box around them, use it: multi-card
+tensor-parallel serving is its home game. It's also Ubuntu-with-a-
+specific-kernel, Docker, and Linux-only for the vLLM path.
+
+The axis that actually decides is streams × precision. LLM decode is
+memory-bandwidth-bound, and 4-bit weights move roughly a quarter of
+the bytes per token — INT4 IR is openvino-genai's native format, so
+**single-user quantized decode on Intel silicon is NoLlama's tier**:
+one to a few streams, the machine you sit at. Moderate shared
+concurrency is OVMS's tier (continuous batching, same INT4 IR).
+Multi-GPU tensor-parallel on Linux is llm-scaler's. Different jobs,
+all three real.

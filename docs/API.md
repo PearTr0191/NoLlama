@@ -1,0 +1,247 @@
+# API and clients
+
+## Usage
+
+```powershell
+# Auto-detect (picks best device)
+python nollama.py
+
+# Force a specific device
+python nollama.py --device NPU
+python nollama.py --device GPU
+python nollama.py --device CPU
+
+# Dual mode: NPU chat + GPU vision
+python nollama.py --model-dir model --gpu-model-dir gpu-model
+
+# Different port
+python nollama.py --port 9000
+
+# Change the default idle-unload timeout (default is 1800 = 30 min)
+python nollama.py --idle-timeout 600     # unload after 10 min idle
+python nollama.py --idle-timeout 0       # never unload — keep models loaded forever
+
+# Log every inbound API request (method, path, User-Agent, body) — handy when
+# wiring up a new agent client and you need to see exactly what it sends
+python nollama.py --debug
+
+# Report a real Ollama version on /api/version so VS Code's Ollama client
+# accepts the server (needed for VS Code Copilot Chat in Ollama mode)
+python nollama.py --vscode-compat
+
+# Prefix (KV) caching is ON by default for GPU/CPU LLM slots — a repeated prompt
+# prefix is prefilled once, not every turn (big win for agent loops, ~47x on a
+# cached turn). The pool is auto-sized per device from its memory budget and
+# the model's KV geometry (a third of what the weights leave free, floor 2 GB,
+# cap ~64k tokens' worth) — the startup log shows the chosen size and its
+# token capacity. Pin the size, or disable caching:
+python nollama.py --cache-size-gb 4     # pin the KV-cache pool (skips auto-sizing)
+python nollama.py --no-prompt-cache     # disable prefix caching
+
+# Pre-warm the cache at startup so the FIRST agent turn is fast too (not just
+# turn 2+). The file auto-populates from the first big prompt served, so the
+# workflow is: run once, then restart with --prewarm to skip the cold prefill.
+# With --idle-timeout 0 this is automatic (as prewarm-<port>.json; opt out
+# with --no-prewarm) — combining --prewarm with idle unload gets a warning,
+# because the warmed cache is thrown away when the model idle-unloads.
+python nollama.py --prewarm prewarm.json
+
+# What models do I actually have? Reports each model directory's real
+# contents — no server started, no model loaded.
+python nollama.py --scan
+python nollama.py --scan D:\models      # search somewhere else
+```
+
+### What have I got? (`--scan`)
+
+`--scan` answers that from the files on disk rather than from what a folder
+is called:
+
+```
+  C:\Users\you\models\Qwen3-Coder-Next-int8-ov
+    Name in API/UI : Qwen3-Coder-Next      (from directory name)
+    Kind           : LLM (text)
+    Architecture   : Qwen3NextForCausalLM / qwen3_next
+    Weights        : INT8 (asymmetric, channel-wise)   80.1 GB on disk
+    MoE            : 512 experts, 10 active per token
+    Geometry       : 48 layers, 262,144-token context, 32 KB/token KV
+    Exported with  : OpenVINO 2026.1.0, optimum-intel 1.27.0, transformers 4.57.6
+    Agent mode     : tool calling on GPU/CPU; never on NPU (hard prompt cap)
+    Integrity      : weights complete
+```
+
+The precision comes from the IR's own `nncf` record, not the directory name
+— a folder called `-int4-ov` can contain anything, and `--scan` reports what
+the weights actually are (including partial quantization and AWQ). It also
+runs the truncation check, so it's the quickest way to tell a bad download
+from a bad model.
+
+**To rename a model,** rename its directory: that name is what the web UI
+shows and what clients request as the model ID. There's deliberately no
+`--model-name` flag — see `TODONT.md`.
+
+**The KV pool sizes itself.** The pool must hold the whole conversation:
+bytes-per-token scale with the model's layer/head geometry (~56 KB/token
+for a 7B coder, ~96 KB/token for Qwen3-Coder-30B). Too small doesn't just
+evict cache — generation on a big agent prompt **fails outright**
+(`Got unfinished GenerationStatus`, see issue #21). So NoLlama sizes the
+pool per device at load: a third of what the weights leave free in the
+device's memory budget, floored at 2 GB and capped at ~64k tokens of the
+model's geometry (enough for a big agent system prompt plus a long
+session). It's a ceiling the cache grows into, not an upfront allocation
+— and the fraction leaves RAM for the compilers and tests an agent runs
+on the same machine. The startup log shows the chosen size and its token
+capacity; `--cache-size-gb N` pins it when you know better (e.g. whole-book
+contexts). The preflight still warns when agent prompts would exhaust the
+pool, and when model + pool exceed the device budget entirely. On Core
+Ultra iGPUs that budget is ~half of system RAM by default — raise it with
+Intel Graphics Software's "Shared GPU Memory Override" (driver 101.6987+).
+Per-request log lines include TTFT, so a prefix-cache hit (sub-second) vs
+a cold prefill (seconds-to-minutes) is visible directly; `/health` reports
+the cache config (`prompt_cache_info.auto`, per-slot `kv_pool_gb`) and
+each slot's last TTFT.
+
+### Idle unload
+
+NoLlama frees model memory after **30 minutes of inactivity by default**
+(an 8B INT4 model holds ~5 GB of RAM; a VLM another ~3 GB). The next
+request automatically reloads the model — the client just sees a slow
+first response (~30-60s for an 8B model on NPU). The web UI shows
+"Reloading model..." while it waits.
+
+Change with `--idle-timeout <seconds>`. Use `0` to keep models loaded
+forever (the old behavior) — recommended for agent use: it also
+auto-enables `--prewarm`, and the warmed prefix cache survives (an idle
+unload discards it until the next restart, which is why mixing
+`--prewarm` with idle unload prints a warning).
+
+`/health` reports `idle_unloaded` slots; the overall status stays
+`ready` because requests can still be served (with a reload).
+
+## API
+
+Standard OpenAI `/v1/chat/completions`. Works with any OpenAI client.
+
+### Text chat
+
+```bash
+curl http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"messages":[{"role":"user","content":"Hello!"}]}'
+```
+
+### Image (VLM, requires GPU with vision model)
+
+```bash
+curl http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "messages":[{"role":"user","content":[
+      {"type":"text","text":"What is in this image?"},
+      {"type":"image_url","image_url":{"url":"data:image/jpeg;base64,..."}}
+    ]}]
+  }'
+```
+
+### Local file shortcut
+
+When client and server are on the same machine, skip base64:
+
+```python
+{"type": "image_url", "image_url": {"url": "file:///C:/path/to/image.jpg"}}
+```
+
+**Note:** `file://` URIs only work locally. Remote clients must use base64.
+
+### Streaming
+
+```bash
+curl -N http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"messages":[{"role":"user","content":"Tell me a story"}],"stream":true}'
+```
+
+### Other endpoints
+
+- `GET /health` — device status, model names, readiness
+- `GET /v1/models` — list loaded models (OpenAI format)
+
+### Response headers
+
+Every response includes `X-Device` and `X-Model` headers so you can
+see which device handled it:
+
+```
+X-Device: NPU
+X-Model: qwen3-8b
+```
+
+## Using with the openai Python package
+
+```python
+from openai import OpenAI
+client = OpenAI(base_url="http://localhost:8000/v1", api_key="unused")
+resp = client.chat.completions.create(
+    model="qwen3-8b",
+    messages=[{"role": "user", "content": "Hello!"}],
+    stream=True,
+)
+for chunk in resp:
+    print(chunk.choices[0].delta.content or "", end="")
+```
+
+## Ollama API
+
+NoLlama also serves a full Ollama-compatible API on port 11434 (the
+Ollama default). Any tool or client that talks to Ollama works without
+modification — it thinks it's talking to a real Ollama instance.
+
+Supported endpoints:
+
+- `POST /api/chat` — chat with streaming (newline-delimited JSON)
+- `POST /api/generate` — single-turn completion
+- `GET /api/tags` — list models
+- `POST /api/show` — model info
+
+```bash
+curl http://localhost:11434/api/chat \
+  -d '{"model":"qwen3-8b-int4-cw","messages":[{"role":"user","content":"Hello!"}]}'
+```
+
+Disable with `--ollama-port 0` if you don't need it or port 11434 is taken.
+
+## Using with OpenWebUI
+
+OpenWebUI can connect via either API:
+
+**OpenAI mode** (recommended):
+
+| Field | Value |
+|---|---|
+| Base URL | `http://host.docker.internal:8000/v1` |
+| API Key | `not-needed` |
+
+**Ollama mode** (no config needed if NoLlama runs on default port):
+
+| Field | Value |
+|---|---|
+| Ollama Base URL | `http://host.docker.internal:11434` |
+
+## Web UI
+
+The server includes a built-in chat interface at http://localhost:8000.
+No separate install, no Docker, no Node.js.
+
+![NoLlama chat UI](docs/images/nollama-chat.gif)
+
+A native Windows GUI is planned to replace the browser-based UI.
+
+Features:
+- Streaming chat with tokens appearing in real-time
+- Collapsible "Thinking..." blocks (Qwen3 reasoning models)
+- Drag-and-drop / paste images for VLM queries
+- Model selector showing loaded models and their devices
+- Device badge on each response (`[NPU 1.2s]`, `[GPU 2.8s]`)
+- Dark theme
+- Keyboard shortcuts: Enter to send, Shift+Enter for newline,
+  Ctrl+V to paste images, Ctrl+N for new chat, Escape to cancel

@@ -765,3 +765,46 @@ being about Qwen3.8 (a plain `requirements.txt` bump serves it) and is only
 worth keeping if a *new* pre-runtime model has taken its place. If none
 has, delete `-Nightly` and `requirements-nightly.txt` rather than
 maintaining an unused path.
+## `--offload-ratio` on a discrete GPU that fits the model (2026-08-18)
+
+Idea: the Arc Pro B60 has XMX, and TODONT/README already record offload as a
+win on XMX hardware (140V: ratio 30 -> 10.8 GB resident @ 25.3 tok/s). A 24 GB
+card should do better still.
+
+**Verdict:** don't. On a card where the model fits, offload is a 5x loss.
+Measured, Qwen3-30B-A3B int4 (15.2 GB) on a B60 (24 GB):
+
+| | resident | `--offload-ratio 30` |
+|---|---|---|
+| decode | **50.8 tok/s** | ~10.5 tok/s |
+| dedicated VRAM | ~15 GB | **3.2 GB** |
+| host (shared) memory | - | **10.2 GB** |
+| GPU copy engine | idle | **97%** |
+| disk activity | - | **0%** |
+
+**Why not:**
+- **It is not streaming from disk.** Both disks sat at 0%. The offloaded experts
+  live in the OS page cache and every token DMAs them across PCIe. The copy
+  engine at 97% is the bottleneck, not storage.
+- **A dGPU pays a bus hop that an iGPU does not.** On the 140V the "offloaded"
+  weights sit in system RAM the GPU addresses directly, so the cost is memory
+  bandwidth (~136 GB/s). On a discrete card it is PCIe against 450 GB/s of VRAM.
+  **Memory topology is the axis, not XMX** - XMX is merely required. The earlier
+  framing ("requires XMX", implying XMX is the qualifier) reads as an
+  endorsement on any XMX card; it is not.
+- **The resident/offload split did not track the ratio.** Ratio 30 left 3.2 GB
+  of 15.2 GB resident (~24%), where the 140V measured 10.8 GB (~71%) at the same
+  setting, with 21 GB of VRAM free and nothing forcing eviction. Either the ratio
+  is a ceiling that a demand-driven expert LRU never fills, or it behaves
+  differently on discrete hardware. Unresolved; would need runs at 50 and 90 to
+  tell which.
+- **Generation stopped being reproducible.** Under greedy decoding (temperature
+  0) the same prompt returned 87, 1944, 1951, 1962 and 2040 tokens across five
+  runs, four of them hitting the token cap, where the resident run returned 478
+  every time. Varying length proves *something* varies; it does not prove the
+  numerics are wrong. Flagged, not diagnosed.
+
+Re-evaluate if: a later OpenVINO makes the split honour the ratio on discrete
+hardware, or someone measures offload against `--device CPU` on a dGPU that
+genuinely cannot fit the model. That second case is the only one where offload
+on a dGPU might still be the right answer, and nobody has measured it.
