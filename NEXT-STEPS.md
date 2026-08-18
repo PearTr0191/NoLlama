@@ -22,6 +22,15 @@ the docs — this file is only what's still open.
   architecture blocklist**, which keeps our own LLM-shaped export on optimum
   where it belongs.
 
+  **This blocks the community Xe3 test.** mikestahili offered (issue #29) to
+  run things on a Core Ultra X7 358H / Arc B390 with 64 GB. Glimmer-on-GenAI on
+  an *integrated* GPU is the datapoint worth having — every previous Glimmer
+  GPU result came from the optimum path, where all four Intel GPU classes
+  corrupted. But until the reroute ships he would be driving raw
+  `openvino_genai` scripts, which tests Intel's export rather than NoLlama.
+  Ship the reroute first, then ask. Don't leave the offer hanging in the
+  meantime.
+
   Still needs the nightly runtime — Intel exported it with a
   `2026.4.0-...-muse_onyx` build and the card wants 2026.3.1+ with a genai
   pre-release. So Glimmer's stack gate becomes **"2026.4 ships stable"** rather
