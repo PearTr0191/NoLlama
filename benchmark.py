@@ -81,7 +81,12 @@ def stream_request(url, body):
     with urllib.request.urlopen(req, timeout=600) as resp:
         buffer = ""
         while True:
-            chunk = resp.read(4096)
+            # read1, not read: HTTPResponse.read(n) blocks until it has n
+            # bytes, so on a stream it waits for ~4 KB of SSE frames (~20+
+            # tokens) before returning anything and inflates TTFT by ~0.3s.
+            # read1 returns as soon as any data is available, which is what
+            # measuring time-to-FIRST-token requires.
+            chunk = resp.read1(4096)
             if not chunk:
                 break
             buffer += chunk.decode("utf-8", errors="replace")
