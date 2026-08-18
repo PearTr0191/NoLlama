@@ -43,7 +43,8 @@ transcription, and every flag: [docs/API.md](docs/API.md).
 ## What to expect
 
 **On a GPU or iGPU: usable now.** Qwen3-8B runs at conversational speed, a 30B
-MoE fits a 24 GB card, and both drive agent loops with tool-calling.
+MoE fits a 24 GB card, and both drive agent loops with tool-calling. **CPU works
+too**, slower — and on a strong desktop it beats a weak iGPU.
 
 **On the NPU: not quite yet.** It tops out at 1-3B-class models. SmolLM3-3B at
 23 tok/s is genuinely pleasant for bounded work — summarise this, extract these
