@@ -45,8 +45,18 @@ the docs — this file is only what's still open.
   the same gate Qwen3.8 is already waiting on. VLM slots get no prefix
   cache (the CB backend is LLM-only), so that win does not arrive with this.
 
-- **Branch `vlm-tool-calling`: VLM slots are agent-grade — review & merge.**
-  Two changes, both verified end-to-end 2026-08-18:
+- **VLM slots are agent-grade (merged as PR #30 + the prewarm commit).**
+  Three changes, all verified end-to-end 2026-08-18:
+
+  0. **Prewarm on VLM slots** (followed the PR straight onto main): capture
+     now happens on the VLM paths of both API surfaces, and the startup
+     prefill replays through `parse_messages`' flattening so the cached
+     token prefix matches real requests. Measured Glimmer/B60 through the
+     network API: first turn after a restart 12.4s → **0.65s** TTFT
+     (startup prewarm cost 12.1s, paid before the port answers requests).
+     Slots whose runtime fell back to the plain pipeline zero `kv_pool_gb`
+     at load, so prewarm skips them rather than burning a 30B prefill for
+     nothing (this also makes `/health` honest about a dead cache).
 
   1. **Tool calling on VLM slots** (both API surfaces; buffered like LLM
      tool turns; images may ride along with tools). Qwen3.5-4B on the 140V
@@ -73,12 +83,19 @@ the docs — this file is only what's still open.
     (16 GB USM allocation failed; the immediate retry succeeded). Under CB
     the same request completed first try. Unexplained — file upstream if it
     reproduces.
-  - **Prewarm is still LLM-only** (`_maybe_capture_prewarm` and the prewarm
-    prefill gate on `model_type == "llm"`). With VLM caching working, wiring
-    prewarm up for VLM slots is the natural follow-up — it converts the one
-    remaining cold 53.7s prefill into a startup cost.
   - The "minutes of prefill" worry for agent prompts was wrong for the B60
     class: 33k tokens prefill in ~9s on the plain pipeline.
+
+- **Intel docs gap — worth a short upstream issue (awaiting go).** The
+  VLMPipeline API docs describe its kwargs only as "Device properties" and
+  never mention `scheduler_config`/prefix caching; the GenAI guide shows
+  SchedulerConfig on LLMPipeline only. The feature works (our measurements
+  above, on 2026.3 release AND 2026.4 nightly), and OVMS docs already
+  advertise continuous-batching VLM serving — so this is undocumented, not
+  unsupported. A "please document scheduler_config on VLMPipeline" issue on
+  openvino.genai with our numbers would help others find it. Separate,
+  smaller: the plain-pipeline first-33k-request USM OOM needs a clean repro
+  before it's filable.
 
 - **Loading a big model stages through host memory first.** Watched on the B60
   (17 GB Glimmer): shared GPU memory ramps to near its 16 GB ceiling and holds

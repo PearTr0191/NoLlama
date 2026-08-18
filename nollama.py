@@ -1259,6 +1259,7 @@ class DeviceSlot:
                 except Exception as e:
                     print(f"  [{self.device_name}] prefix caching unavailable "
                           f"({e}); using plain pipeline", flush=True)
+                    self.kv_pool_gb = 0  # no cache: report honestly, skip prewarm
                     self.pipe = VLMPipe(str(model_dir), device=self.device_id,
                                         **offload)
             else:
@@ -1292,6 +1293,7 @@ class DeviceSlot:
                 except Exception as e:
                     print(f"  [{self.device_name}] prefix caching unavailable "
                           f"({e}); using plain pipeline", flush=True)
+                    self.kv_pool_gb = 0  # no cache: report honestly, skip prewarm
                     self.pipe = ovg.LLMPipeline(str(model_dir), device=self.device_id,
                                                 **offload)
             else:
@@ -2535,13 +2537,17 @@ def _maybe_capture_prewarm(raw_messages):
 
 def _prewarm_slot(slot):
     """Prefill the saved prompt at startup so the first real (cold) turn is a
-    cache hit. Only meaningful on a GPU/CPU LLM slot with prefix caching on.
+    cache hit. Only meaningful on a GPU/CPU slot with prefix caching live —
+    LLM and VLM slots both prefix-cache (see DeviceSlot.load).
     """
-    if not (PREWARM_FILE and PROMPT_CACHE and slot.model_type == "llm"
+    if not (PREWARM_FILE and PROMPT_CACHE
             and slot.device_name in ("GPU", "CPU")
-            and getattr(slot, "supports_prefix_cache", False)):
-        # OptimumSlot has no prefix cache — a prewarm prefill would burn a
-        # full 30B-scale prefill at startup for nothing.
+            and getattr(slot, "supports_prefix_cache", False)
+            and getattr(slot, "kv_pool_gb", 0)):
+        # No live cache pool — a prewarm prefill would burn a full 30B-scale
+        # prefill at startup for nothing (OptimumSlot; slots whose runtime
+        # rejected the scheduler config and fell back to the plain pipeline,
+        # which zero kv_pool_gb at load).
         return
     if not os.path.isfile(PREWARM_FILE):
         return
@@ -2557,7 +2563,14 @@ def _prewarm_slot(slot):
         gen.max_new_tokens = 1
         gen.do_sample = False
         t0 = time.perf_counter()
-        slot.generate_llm(raw_messages, gen)  # prefills -> populates prefix cache
+        if slot.model_type == "vlm":
+            # Replay through the same flattening the serving path uses, so
+            # the cached token prefix matches real requests (VLMPipeline
+            # takes a flattened string, not ChatHistory).
+            text_prompt, _, _ = parse_messages(raw_messages, max_dim)
+            slot.generate_vlm(text_prompt, [], gen)
+        else:
+            slot.generate_llm(raw_messages, gen)  # prefills -> populates prefix cache
         slot.prewarmed = True
         print(f"  [{slot.device_name}] pre-warmed prompt cache from "
               f"{os.path.basename(PREWARM_FILE)} ({time.perf_counter() - t0:.1f}s)",
@@ -2792,6 +2805,10 @@ def chat_completions():
 
     t0 = time.perf_counter()
 
+    # Capture a big agent prompt so the next startup can pre-warm it (no-op
+    # unless --prewarm is set). VLM slots prefix-cache too, so they capture too.
+    _maybe_capture_prewarm(raw_messages)
+
     # --- VLM path ---
     if slot.model_type == "vlm":
         # Tool turns are buffered like the LLM path's (structured tool_calls
@@ -2845,10 +2862,6 @@ def chat_completions():
         resp.headers["X-Device"] = slot.device_name
         resp.headers["X-Model"] = slot.model_name
         return resp
-
-    # Capture a big agent prompt so the next startup can pre-warm it (no-op
-    # unless --prewarm is set).
-    _maybe_capture_prewarm(raw_messages)
 
     # --- LLM path ---
     if stream and not tools_active:
@@ -3062,9 +3075,8 @@ def ollama_chat():
     # Capture a big agent prompt so the next startup can pre-warm it (no-op
     # unless --prewarm is set). Mirrors the OpenAI path at chat_completions —
     # clients on the plain Ollama API (pre-0.53 Copilot, Open WebUI, ...)
-    # reach us through this handler, not /v1.
-    if slot.model_type == "llm":
-        _maybe_capture_prewarm(raw_messages)
+    # reach us through this handler, not /v1. VLM slots prefix-cache too.
+    _maybe_capture_prewarm(raw_messages)
 
     # Build generation config
     gen = ovg.GenerationConfig()

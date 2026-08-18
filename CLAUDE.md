@@ -24,7 +24,12 @@ OpenAI-compatible LLM/VLM server for Intel hardware. NPU-first.
   `--cache-size-gb N` pins it (skips auto). NPU slots keep the
   plain pipeline (no CB path; NPU keeps MAX_PROMPT_LEN). Falls back to the plain
   pipeline with a warning if a device or runtime can't build the CB backend.
-  Prewarm/prompt-capture is still LLM-only (VLM prewarm untested — see NEXT-STEPS). `--prewarm <file>`
+  Prewarm/prompt-capture covers VLM slots too (2026-08-18): capture on both API
+  surfaces; the startup prefill replays through parse_messages' flattening so the
+  cached token prefix matches real requests. Measured, Glimmer/B60: first turn
+  after restart 12.4s → 0.65s TTFT. Slots whose runtime fell back to the plain
+  pipeline zero kv_pool_gb at load, so prewarm skips them instead of burning a
+  30B-scale prefill for nothing. `--prewarm <file>`
   prefills a saved agent prompt at startup (the file auto-captures the first big prompt
   served via `_maybe_capture_prewarm` — on both the OpenAI and Ollama chat paths — so: run
   once → restart with `--prewarm`) so even the first turn is a cache hit instead of a cold

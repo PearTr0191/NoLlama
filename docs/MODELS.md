@@ -248,8 +248,9 @@ What to know before switching:
   Glimmer on the B60) and **prefix caching works** (VLMPipeline honors
   `scheduler_config` on 2026.3+; measured on the B60: a 33k-token prefix
   went 54.5s → 1.3s TTFT on the repeat turn — what an agent's fixed system
-  prompt does every turn). Prewarm is still LLM-only, and images are
-  untested on Glimmer.
+  prompt does every turn). Prewarm covers VLM slots too, so a restart
+  prefills the captured agent prompt before the first request (Glimmer/B60:
+  first turn 12.4s → 0.65s TTFT). Images are untested on Glimmer.
 - `--backend optimum` still forces the old path (needs `venv-optimum/`).
 
 ## Brand-new architectures: the optimum backend
@@ -406,8 +407,9 @@ Know what you are signing up for before you pull 15.7 GB:
   OpenVINO"**, and nightly wheels change daily.
 - It is a **VLM**, so it lands on `VLMPipeline`. Prefix caching now works
   on VLM slots (verified 2026-08-18 on 2026.3 release and the 2026.4
-  nightly), so agent turns reuse the prefilled system prompt; prewarm is
-  still LLM-only, so the *first* turn after a start pays the full prefill.
+  nightly), so agent turns reuse the prefilled system prompt — and prewarm
+  covers VLM slots too, so after the first captured run even a restart's
+  first turn is a cache hit.
 - It is **dense**, not MoE, so `--offload-ratio` does nothing for it. The
   15.7 GB of weights must be resident.
 - That rules out a stock 16 GB Arc 140V. It wants a 24 GB card (Arc B60)
