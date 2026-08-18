@@ -1793,20 +1793,39 @@ class OptimumSlot(DeviceSlot):
         self._preflight_memory(vlm=False)
         self._lazy_import()
         if self.device_name == "GPU":
-            # Observed GPU-plugin failure modes, both expensive to hit:
-            # Xe-LPG compiles for minutes then dies at warmup on a dynamic-
-            # shape op; Xe2 (Arc 140V, Windows) and Xe3 (Arc B390 iGPU,
-            # Linux — issue #24 report) warm up fine but SILENTLY compute
-            # garbage — the model half-perceives the prompt, hallucinates,
-            # and greedy-loops (same IR is correct on CPU). Three iGPU
-            # generations, two OSes: assume every iGPU is affected.
-            # Discrete Battlemage is untested. Warn before the compile.
-            print(f"  [GPU] WARNING: the optimum backend on GPU is "
-                  f"plugin-dependent — Xe-LPG iGPUs fail at warmup "
-                  f"('dynamic shape'); Xe2 (140V) and Xe3 (B390) iGPUs run "
-                  f"but produce corrupted output (openvino issue #37419); "
-                  f"--device CPU is the only verified-correct choice",
-                  flush=True)
+            # The corruption is OpenVINO-version-dependent, so key the warning
+            # on the runtime rather than the device. On 2026.3 every GPU tested
+            # was wrong: Xe-LPG died at warmup on a dynamic-shape op; Xe2 (140V,
+            # Windows), Xe3 (B390, Linux — issue #24) and discrete Battlemage
+            # (Arc Pro B60) warmed up fine and SILENTLY computed garbage — the
+            # model half-perceives the prompt and greedy-loops, while the same
+            # IR is correct on CPU. Verified fixed on 2026.4.0.dev20260814
+            # (B60, 2026-08-15): the issue's own repro now quotes the prompt
+            # verbatim on GPU. Warn before the compile, which costs minutes.
+            try:
+                import openvino as _ov
+                _ov_ver = _ov.__version__
+            except Exception:
+                _ov_ver = ""
+            # 2026.4+ (including its nightlies) carries the fix; anything older
+            # is a known-bad combination for this backend. Compare numerically,
+            # not as strings: "2026.10" < "2026.4" lexically but not in fact.
+            _m = re.match(r"(\d+)\.(\d+)", _ov_ver or "")
+            _fixed = bool(_m) and (int(_m.group(1)), int(_m.group(2))) >= (2026, 4)
+            if _fixed:
+                print(f"  [GPU] NOTE: the optimum backend on GPU corrupted "
+                      f"output on OpenVINO <=2026.3 (issue #37419); this "
+                      f"runtime ({_ov_ver}) is past the fix. Sanity-check the "
+                      f"first reply anyway — the failure is silent.",
+                      flush=True)
+            else:
+                print(f"  [GPU] WARNING: the optimum backend on GPU produces "
+                      f"CORRUPTED OUTPUT on OpenVINO <=2026.3 — every device "
+                      f"tested (Xe-LPG/Xe2/Xe3 iGPUs and the discrete Arc Pro "
+                      f"B60) fails, silently (openvino issue #37419). This "
+                      f"runtime is {_ov_ver or 'unknown'}. Use --device CPU, "
+                      f"or 2026.4+ where it is verified fixed.",
+                      flush=True)
         print(f"  [{self.device_name}] Loading (optimum-intel runtime)...",
               flush=True)
         from optimum.intel import OVModelForCausalLM, OVModelForVisualCausalLM

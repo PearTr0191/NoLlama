@@ -43,28 +43,67 @@ remote code isn't needed at all; (c) anyone captures the actual
 Idea: serve Muse-Glimmer-30B int4 on the iGPU instead of CPU — the 140V
 warmed up in 2.9s and streamed at ~2.8 tok/s, looked like a win.
 
-**Verdict:** don't, on any current iGPU family, until a new OpenVINO GPU
-plugin passes the comprehension test below. Xe-LPG fails loudly at warmup
-(`Count is called for dynamic shape`). Xe2 (Arc 140V, OpenVINO 2026.3,
-Windows) is the trap: it runs and *looks* healthy, but inference is
-numerically wrong — and a community report (issue #24, 2026-08-13)
-reproduced the identical fingerprint on **Xe3** (Arc B390 iGPU, Panther
-Lake, **Fedora**), so this is the GPU plugin's handling of the graph,
-not one generation's numerics or one OS's driver. All failures so far
-are iGPUs (shared-memory path); discrete Battlemage is untested —
-the model half-perceives the prompt (asked `Respond only with the text
-"HELLO!"`, its think channel quoted the user as saying "Respond only text"),
-hallucinates content that was never sent (an entire fake system prompt),
-and greedy decoding degenerates into a two-word loop inside the think
-channel that never ends. The identical IR with identical sampling on CPU
-quotes the instruction verbatim and complies exactly. Diagnosed 2026-08-13
-after three red herrings (think-block history round-trip, stale failed
-sends in web-UI history — both real bugs, both fixed, neither the cause).
+**RESOLVED 2026-08-15 — fixed in OpenVINO 2026.4.** On
+`2026.4.0.dev20260814` the issue's own repro quotes the prompt verbatim on
+the B60 GPU and decodes at 8-9 tok/s (vs ~2 while corrupt, and 1.0 on the CPU
+control). The verdict below stands for **2026.3 and earlier**, which is still
+what a `pip install openvino` gives you today — `nollama.py` therefore keys
+its GPU warning on the runtime version, not the device. Everything after this
+paragraph is the pre-fix evidence; keep it, because it is what that version
+check is protecting users from, and because the *method* (same-venv CPU
+control) is what made the verdict trustworthy in both directions.
+
+**Verdict (OpenVINO <= 2026.3):** don't, on **any Intel GPU — integrated or
+discrete** — until a new OpenVINO GPU plugin passes the comprehension test
+below. Xe-LPG fails
+loudly at warmup (`Count is called for dynamic shape`). Xe2 (Arc 140V,
+OpenVINO 2026.3, Windows) is the trap: it runs and *looks* healthy, but
+inference is numerically wrong — and a community report (issue #24,
+2026-08-13) reproduced the identical fingerprint on **Xe3** (Arc B390 iGPU,
+Panther Lake, **Fedora**), so this is the GPU plugin's handling of the
+graph, not one generation's numerics or one OS's driver. The model
+half-perceives the prompt (asked `Respond only with the text "HELLO!"`, its
+think channel quoted the user as saying "Respond only text") and greedy
+decoding degenerates into a two-word loop inside the think channel that
+never ends. The identical IR with identical sampling on CPU quotes the
+instruction verbatim and complies exactly. Diagnosed 2026-08-13 after three
+red herrings (think-block history round-trip, stale failed sends in web-UI
+history — both real bugs, both fixed, neither the cause).
+
+**Discrete Battlemage settled it (2026-08-15).** Arc Pro B60 24 GB, Windows,
+OpenVINO 2026.3: same corruption. The shared-memory hypothesis the iGPU-only
+evidence had suggested is dead — dedicated VRAM behaves identically, so four
+device classes across two OSes now share one fingerprint. Two details worth
+keeping:
+
+- **It is a runaway generation, not a hang.** GPU sat near 100% throughout;
+  the loop would have run to `max_tokens` (16384 from the web UI) and
+  returned garbage after an hour. Cancel works, because the streamer is
+  yielding — this is *not* the uninterruptible-native-code case. Cap
+  `max_tokens` when testing so a corrupt run ends in seconds.
+- **Restating the system prompt in the think channel is normal**, on CPU
+  too — so not every mention of it is a symptom. On the B60 the think
+  channel read `Respond directly.` where the real system prompt is 15
+  words; the CPU control produced the full text. That is the *dropped
+  words* signature, not hallucination. Keep it distinct from the Xe2
+  observation of a wholly **fake** system prompt ("You are an expert in
+  competitive programming…", never sent) — that one is real hallucination
+  and still stands. Two different symptoms; don't merge them.
+
+**Always run the CPU control on the same box, same venv, same session.**
+`install-optimum.ps1` tracks transformers `main`, so the stack moves between
+test runs. Without the control, "the GPU plugin is broken" and "transformers
+regressed since the last test" fit the evidence equally well, and you would
+file the wrong bug upstream.
 
 **Comprehension test** (cheap, definitive): multi-turn chat, ask
 `Respond only with the text "HELLO!"`, expand the thinking. If the model
 can't quote the instruction back, the plugin is corrupting inference —
-no error is raised anywhere. This is also the B60 acceptance test.
+no error is raised anywhere.
+
+Scope note: this is the **optimum backend** only. The GenAI path is fine on
+the same hardware — Qwen3.8-27B runs correctly on that same B60 (2026-08-15).
+Don't cite a GenAI-path success as evidence about this bug, or vice versa.
 
 ## Port-availability check via bind() probe (2026-05 -> 2026-08-11)
 

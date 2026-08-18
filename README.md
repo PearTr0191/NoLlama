@@ -230,26 +230,75 @@ works, and both API surfaces behave identically. Differences from GenAI
 slots: **text-only for now** (images get a clean 400), no prefix cache /
 prewarm (a GenAI feature), no `--offload-ratio`, and no NPU. GPU support
 also depends on the OpenVINO GPU plugin executing the model's
-dynamic-shape graph, and as of OpenVINO 2026.3 **no Intel iGPU family runs
-Glimmer correctly** — use `--device CPU`:
+dynamic-shape graph. On OpenVINO **2026.3 and earlier, no Intel GPU runs
+Glimmer correctly — integrated or discrete** — so on a release runtime, use
+`--device CPU`. **Fixed in 2026.4** (verified on the nightly, see below):
+
+- **2026.4.0.dev20260814** (Arc Pro B60, 2026-08-15): the issue's own repro
+  script now quotes the prompt **verbatim** on GPU and reasons coherently to
+  the right answer, where 2026.3 misquoted it and answered a question that
+  was never asked. Decode also went from ~2 to **8–9 tok/s** — nine times the
+  CPU control on the same box, which turns Glimmer-on-GPU from
+  verification-only into something usable. NoLlama checks the runtime version
+  at load and downgrades its GPU warning to a note on 2026.4+.
+
+  **So Glimmer on an Intel GPU is coming, and we know it works** — but the
+  fix is only in a nightly today, and NoLlama stays leading edge rather
+  than bleeding edge. It moves into `install.ps1`/`models.json` when 2026.4
+  ships as a *release* (and the stack gate closes too — see
+  `NEXT-STEPS.md`); until then the manual path below is the honest
+  offering. Sanity-check your first reply regardless: the failure mode was
+  always silent.
+
+The 2026.3 evidence, kept because it's what the version check is protecting
+you from:
 
 - **Xe-LPG** (desktop Arrow Lake iGPU): fails loudly at warmup
   (`Count is called for dynamic shape`).
 - **Xe2** (Arc 140V, Windows, verified 2026-08-13): loads and warms up
   fine, then **silently computes garbage** — the model half-perceives the
-  prompt (drops words, hallucinates a system prompt that was never sent)
-  and greedy decoding degenerates into a two-word loop inside the think
-  channel. The same IR with the same sampling params comprehends and
-  complies perfectly on CPU. There is no error to catch: the only symptom
-  is a model that seems drunk.
+  prompt (drops words) and greedy decoding degenerates into a two-word
+  loop inside the think channel. The same IR with the same sampling params
+  comprehends and complies perfectly on CPU. There is no error to catch:
+  the only symptom is a model that seems drunk.
 - **Xe3** (Arc B390 iGPU in Core Ultra X7 358H, **Linux**, community
   report in issue #24, 2026-08-13): identical corruption fingerprint —
   same "the user message is garbled" half-perception, same think-loop
   hang under greedy. Three iGPU generations and two OSes rule out any
-  Windows-driver or Xe2-specific theory; tracked upstream as
-  [openvinotoolkit/openvino#37419](https://github.com/openvinotoolkit/openvino/issues/37419).
-  Discrete Battlemage (dedicated VRAM, different memory path) is the one
-  untested configuration — the comprehension test below is its go/no-go.
+  Windows-driver or Xe2-specific theory.
+- **Discrete Battlemage** (Arc Pro B60 24 GB, Windows, verified
+  2026-08-15): **same corruption.** Dedicated VRAM does not save it, which
+  kills the shared-memory theory the iGPU-only evidence had suggested.
+  "Say hi" returned `Respond directly.` in the think channel — the system
+  prompt restated with most of its words missing — then the `HELLO!`
+  prompt looped until cancelled, GPU pegged near 100% the whole time. It
+  is a runaway generation, not a deadlock: it would have ground on to
+  `max_tokens` and returned garbage.
+
+  Controlled on the same machine, same venv, same IR, same session: CPU
+  quoted the instruction back verbatim and answered `HELLO!` correctly.
+  That control matters more than it looks — `install-optimum.ps1` tracks
+  transformers `main`, so without it "the GPU is broken" and "transformers
+  regressed this week" fit the evidence equally well.
+
+  Read the *think channel*, not the answer — but note that restating the
+  system prompt there is normal Glimmer behaviour, on CPU too. The tell is
+  words going *missing* from that restatement, not the restatement itself.
+  (Distinct from the Xe2 case, where it quoted a system prompt that was
+  never sent at all — that one really is hallucination.)
+
+Four device classes across two OSes, so on 2026.3 this was plugin-wide rather
+than any one generation; tracked upstream as
+[openvinotoolkit/openvino#37419](https://github.com/openvinotoolkit/openvino/issues/37419),
+and **fixed in 2026.4**. Re-run the comprehension test on each new OpenVINO
+release anyway — and note the GenAI path was never affected: Qwen3.8-27B runs
+correctly on the same B60 on both runtimes.
+
+Test it yourself with `.\install-optimum.ps1 -Nightly`, which builds a second
+`venv-optimum-nightly/` and leaves the release venv intact as a control. Keep
+that control: without a same-venv, same-session CPU run, "the GPU plugin
+changed" and "transformers main moved" are indistinguishable, because
+`install-optimum.ps1` tracks git main for both.
 
 The catch is the python stack: these models need transformers **from git
 main** plus optimum-intel **from git main**, which no NoLlama venv pins.
