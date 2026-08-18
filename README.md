@@ -70,11 +70,10 @@ because LLM decode streams the whole model per token.
 ᵃ Core Ultra 9 **285K** desktop — DDR5-6400 (~100 GB/s), 4-core Xe-LPG iGPU, NPU 3.
 ᵇ AMD Ryzen 9 **5950X** — DDR4 (~50 GB/s). Unsupported-but-measured; see below.
 ᶜ Core Ultra 7 **258V** laptop — Arc 140V iGPU on LPDDR5X-8533 (~136 GB/s).
-ᵈ **Arc Pro B60** 24 GB dGPU in a Ryzen 9 5950X box (2026-08-18). The 30B row
-is **fully resident** — 15.2 GB fits 24 GB — where the 140V had to stream experts
-from disk to run it at all, so that comparison flatters the dGPU: it is measuring
-an easier job, not just faster silicon. Do not use `--offload-ratio` here; on a
-card the model fits, it costs ~5× (see [disk offload](#big-moe-models-on-small-gpus-disk-offload)).
+ᵈ **Arc Pro B60** 24 GB dGPU, Ryzen 9 5950X box (2026-08-18). Its 30B row is
+resident — 15.2 GB fits 24 GB — where the 140V had to stream experts to run at
+all. Easier job, not just faster silicon. Don't use `--offload-ratio` on a card
+that fits: it costs 5× (see [disk offload](#big-moe-models-on-small-gpus-disk-offload)).
 † 285K CPU at *whole-novel context* (~6 tok/s) — KV reads eat bandwidth at that
 scale; no clean short-context CPU number for the MoE yet.
 ‡ Pronounced, not measured: DDR5 already sits at ~6 tok/s (†), and DDR4 has
@@ -84,13 +83,11 @@ context. Not worth the 17 GB download to confirm.
 Reading it: the memory column, not the device column, predicts most of the
 table (the laptop iGPU beats the desktop's because its *memory* is faster).
 Protocols vary slightly across rows — the [benchmark sections](#benchmark-core-ultra-7-258v-arc-140v-16-gb--laptop-lpddr5x)
-have the methodology; treat cells as ±10%. Every cell uses the `count 1-100`
-test as its steady-state metric — decode falls as a generation lengthens (KV reads
-grow with context), so a figure without its test is not reproducible.
+have the methodology; treat cells as ±10%. All cells use the `count 1-100` test.
+Decode drops as output grows, so a number without its test means little.
 
-This table is decode only. Prefill (TTFT) depends heavily on prompt length and
-client, so it is reported per-benchmark below rather than compared across
-hardware here. For scale: an RTX 5090 does ~230
+Decode only — prefill depends too much on prompt length to compare across
+hardware. For scale: an RTX 5090 does ~230
 tok/s on the same 8B via Ollama — the [desktop benchmark](#benchmark-core-ultra-9-285k-rtx-5090--desktop-ddr5)
 explains why NoLlama doesn't compete there.
 
@@ -208,31 +205,25 @@ territory. **Requires an XMX-capable GPU** (Arc, Lunar Lake and newer —
 feature silently does nothing, and NoLlama warns at startup instead of
 letting you believe your model got smaller.
 
-**Confirmed XMX so far** (`GPU_HW_MATMUL` in `OPTIMIZATION_CAPABILITIES`): Arc
-140V iGPU, and Arc Pro B60 discrete — the desktop Xe-LPG iGPU does **not** have
-it. The flag is necessary, not sufficient: it says the offload path will engage,
-not that a model fits or performs, and it does nothing at all for dense models,
-which have no experts to stream.
+**XMX confirmed on** (`GPU_HW_MATMUL` in `OPTIMIZATION_CAPABILITIES`): Arc 140V
+iGPU, Arc Pro B60. **Not** on the desktop Xe-LPG iGPU. The flag only means
+offload will engage — not that a model fits, and nothing at all for dense
+models, which have no experts to stream.
 
-**On a discrete card, do not use offload.** It exists to make a model that does
-not fit run at all. Where the model *does* fit, every offloaded byte crosses
-PCIe instead of being read from VRAM — a bad trade: Qwen3-30B-A3B on an Arc Pro
-B60 (2026-08-18) went from **50.8 tok/s resident to ~10.5 at
-`--offload-ratio 30`**. 5× slower, with the GPU's *copy* engine pegged at 97%,
-3.2 GB resident against 10.2 GB in host RAM, and both disks completely idle:
-nothing was streaming from disk, it was streaming across the bus.
+**Don't use offload on a discrete card.** It exists to run models that don't
+fit. If the model fits, every offloaded byte crosses PCIe instead of VRAM.
+Qwen3-30B-A3B on a B60 (2026-08-18): **50.8 tok/s resident, ~10.5 at
+`--offload-ratio 30`.** 5× slower, copy engine at 97%, 3.2 GB in VRAM against
+10.2 GB in host RAM, both disks idle. It streams across the bus, not from disk.
 
-Which is also why the 140V does *better* at the same setting. On an integrated
-GPU the offloaded weights sit in system RAM that the GPU addresses directly, so
-the cost is memory bandwidth (~136 GB/s on LPDDR5X) rather than a PCIe round
-trip. **Memory topology is the axis, not XMX** — XMX is merely required.
+That's why an iGPU does better: there the offloaded weights sit in RAM the GPU
+reads directly (~136 GB/s on LPDDR5X), no bus hop. **Memory topology decides
+this, not XMX.**
 
-Two cautions on that dGPU result. Generation stopped being reproducible under
-offload: identical greedy prompts returned between 87 and 2040 tokens, where the
-resident run returned 478 every single time. And offload-versus-CPU on a card
-that genuinely *cannot* fit the model has never been measured — so if you are
-out of VRAM, compare `--offload-ratio` against `--device CPU` and a smaller
-quant rather than assuming offload wins.
+Two cautions. Greedy output stopped being reproducible under offload — 87 to
+2040 tokens for the same prompt, where resident gave 478 every time. And nobody
+has compared offload against `--device CPU` on a card that *can't* fit the
+model, so don't assume offload wins there.
 
 ### Where does your hardware land? (big-MoE routes, measured 2026-08)
 
@@ -251,9 +242,8 @@ quants and sizes, so read it as *routes*, not a controlled A/B:
 | 8-core laptop CPU (LPDDR5X) | NoLlama/OpenVINO | 30B-A3B int4 | 9.1 |
 | Non-XMX desktop iGPU | — | any big MoE | won't load |
 
-Note the two B60 rows: same card, same model, and the only difference is a flag.
-Offload is not a performance feature, it is a way to run something that otherwise
-would not — and on a card with room it costs 5×.
+The two B60 rows differ by one flag. Offload isn't a speed feature — it's a way
+to run what otherwise won't, and on a card with room it costs 5×.
 
 Takeaways: a dedicated CUDA card is now ~1.4× the best Intel route — but
 every Intel row above is *usable*, runs on hardware you may already own,
@@ -445,10 +435,9 @@ the `count 1-100` test as the steady-state decode metric.
 | **Decode tok/s** (count 1-100) | **21.7** | 13.4 |
 | Decode tok/s (2+2, thinking) | 18.6 | 11.2 |
 
-**NoLlama's OpenVINO GPU path is ~1.6× faster on decode.** Prefill is not
-compared here — the two backends were last measured at different times and a
-like-for-like TTFT run on this iGPU has not been done. Two caveats that matter
-in practice:
+**NoLlama's OpenVINO GPU path is ~1.6× faster on decode.** Prefill isn't
+compared — the two were measured at different times. Two caveats that matter in
+practice:
 
 - **Ollama drops the iGPU by default** — it needs `OLLAMA_IGPU_ENABLE=1`,
   or it silently runs on CPU. The out-of-the-box Ollama experience on
@@ -495,9 +484,9 @@ python benchmark.py --backend ollama --model qwen3:8b --label rtx5090 --runs 3 -
 | NoLlama (OpenVINO) | iGPU (Xe-LPG, 4 cores) | 15.4 | 0.87× |
 | NoLlama (OpenVINO) | NPU 3 (Intel AI Boost) | 10.0 | 0.56× |
 
-Prefill on this hardware is fast enough not to be the story — the Intel devices
-land around 0.2 s to first token on a short prompt. Long agent prompts are a
-different matter; see [Agent tools](#agent-tools--coding-assistants-vs-code-copilot-openclaw).
+Prefill isn't the story here — all these devices hit first token in ~0.2 s on a
+short prompt. Long agent prompts are another matter: see
+[Agent tools](#agent-tools--coding-assistants-vs-code-copilot-openclaw).
 
 **Surprises on this hardware:**
 
@@ -509,9 +498,8 @@ different matter; see [Agent tools](#agent-tools--coding-assistants-vs-code-copi
 - **NPU is the slowest Intel device on desktop**, opposite of the laptop
   story. NPU's value is power efficiency (laptop on battery), not
   throughput on mains.
-- **The gap is a decode gap.** The RTX 5090's advantage over the NPU is ~23× on
-  decode. On short prompts all of these devices reach first token quickly, so
-  the difference you feel is throughput, not latency.
+- **It's a decode gap.** The 5090 leads the NPU ~23× on decode. Short prompts
+  reach first token fast everywhere, so what you feel is throughput.
 - **The dGPU dominates** — if you have one, use it. NoLlama's CPU
   fallback is good for "Intel-only laptop on battery", not for
   competing with a discrete card.
