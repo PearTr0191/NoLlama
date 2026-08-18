@@ -63,13 +63,18 @@ because LLM decode streams the whole model per token.
 
 | Model (int4) | NPU | iGPU | Arc dGPU | CPU (DDR5) | CPU (DDR4) |
 |---|---|---|---|---|---|
-| SmolLM3-3B (~2 GB) | 23.3 ᵃ | 29.7 ᵃ | *wanted* | 37.5 ᵃ | 23.0 ᵇ |
-| Qwen3-8B (~5 GB) | 10.0 ᵃ | 21.7 ᶜ / 15.4 ᵃ | *wanted* | 17.8 ᵃ | *wanted* |
-| Qwen3-30B-A3B MoE (~17 GB, ~2 GB active) | n/a — over the NPU's size class | 25.3 ᶜ (`--offload-ratio 30`) | *wanted* (B60 numbers coming) | ~6 † | ‡ |
+| SmolLM3-3B (~2 GB) | 23.3 ᵃ | 29.7 ᵃ | **77.9** ᵈ | 37.5 ᵃ | 23.0 ᵇ |
+| Qwen3-8B (~5 GB) | 10.0 ᵃ | 21.7 ᶜ / 15.4 ᵃ | **64.5** ᵈ | 17.8 ᵃ | *wanted* |
+| Qwen3-30B-A3B MoE (~17 GB, ~2 GB active) | n/a — over the NPU's size class | 25.3 ᶜ (`--offload-ratio 30`) | **50.8** ᵈ (resident) | ~6 † | ‡ |
 
 ᵃ Core Ultra 9 **285K** desktop — DDR5-6400 (~100 GB/s), 4-core Xe-LPG iGPU, NPU 3.
 ᵇ AMD Ryzen 9 **5950X** — DDR4 (~50 GB/s). Unsupported-but-measured; see below.
 ᶜ Core Ultra 7 **258V** laptop — Arc 140V iGPU on LPDDR5X-8533 (~136 GB/s).
+ᵈ **Arc Pro B60** 24 GB dGPU in a Ryzen 9 5950X box (2026-08-18). The 30B row
+is **fully resident** — 15.2 GB fits 24 GB — where the 140V had to stream experts
+from disk to run it at all, so that comparison flatters the dGPU: it is measuring
+an easier job, not just faster silicon. Do not use `--offload-ratio` here; on a
+card the model fits, it costs ~5× (see [disk offload](#big-moe-models-on-small-gpus-disk-offload)).
 † 285K CPU at *whole-novel context* (~6 tok/s) — KV reads eat bandwidth at that
 scale; no clean short-context CPU number for the MoE yet.
 ‡ Pronounced, not measured: DDR5 already sits at ~6 tok/s (†), and DDR4 has
@@ -79,7 +84,13 @@ context. Not worth the 17 GB download to confirm.
 Reading it: the memory column, not the device column, predicts most of the
 table (the laptop iGPU beats the desktop's because its *memory* is faster).
 Protocols vary slightly across rows — the [benchmark sections](#benchmark-core-ultra-7-258v-arc-140v-16-gb--laptop-lpddr5x)
-have the methodology; treat cells as ±10%. For scale: an RTX 5090 does 197
+have the methodology; treat cells as ±10%. Every cell uses the `count 1-100`
+test as its steady-state metric — decode falls as a generation lengthens (KV reads
+grow with context), so a figure without its test is not reproducible. The dGPU
+column was measured 2026-08-18 with a corrected harness; the older rows read a
+few percent high on decode, and **TTFT figures measured on Windows before then
+can carry a fixed ~2 s loopback penalty** that has since been removed, so do not
+compare TTFT across rows until they are re-measured. For scale: an RTX 5090 does 197
 tok/s on the same 8B via Ollama — the [desktop benchmark](#benchmark-core-ultra-9-285k-rtx-5090--desktop-ddr5)
 explains why NoLlama doesn't compete there.
 
@@ -197,6 +208,32 @@ territory. **Requires an XMX-capable GPU** (Arc, Lunar Lake and newer —
 feature silently does nothing, and NoLlama warns at startup instead of
 letting you believe your model got smaller.
 
+**Confirmed XMX so far** (`GPU_HW_MATMUL` in `OPTIMIZATION_CAPABILITIES`): Arc
+140V iGPU, and Arc Pro B60 discrete — the desktop Xe-LPG iGPU does **not** have
+it. The flag is necessary, not sufficient: it says the offload path will engage,
+not that a model fits or performs, and it does nothing at all for dense models,
+which have no experts to stream.
+
+**On a discrete card, do not use offload.** It exists to make a model that does
+not fit run at all. Where the model *does* fit, every offloaded byte crosses
+PCIe instead of being read from VRAM — a bad trade: Qwen3-30B-A3B on an Arc Pro
+B60 (2026-08-18) went from **50.8 tok/s resident to ~10.5 at
+`--offload-ratio 30`**. 5× slower, with the GPU's *copy* engine pegged at 97%,
+3.2 GB resident against 10.2 GB in host RAM, and both disks completely idle:
+nothing was streaming from disk, it was streaming across the bus.
+
+Which is also why the 140V does *better* at the same setting. On an integrated
+GPU the offloaded weights sit in system RAM that the GPU addresses directly, so
+the cost is memory bandwidth (~136 GB/s on LPDDR5X) rather than a PCIe round
+trip. **Memory topology is the axis, not XMX** — XMX is merely required.
+
+Two cautions on that dGPU result. Generation stopped being reproducible under
+offload: identical greedy prompts returned between 87 and 2040 tokens, where the
+resident run returned 478 every single time. And offload-versus-CPU on a card
+that genuinely *cannot* fit the model has never been measured — so if you are
+out of VRAM, compare `--offload-ratio` against `--device CPU` and a smaller
+quant rather than assuming offload wins.
+
 ### Where does your hardware land? (big-MoE routes, measured 2026-08)
 
 Same model family (Qwen3 MoE, A3B-class), steady-state decode, best route
@@ -206,13 +243,19 @@ quants and sizes, so read it as *routes*, not a controlled A/B:
 | Hardware | Stack & route | Model | tok/s |
 |---|---|---|---|
 | RTX 5090 32 GB + CPU (hybrid auto-split) | Ollama/CUDA | Coder-Next Q4, 53 GB | **~73** |
+| **Arc Pro B60 24 GB dGPU, model fits resident** | NoLlama/OpenVINO | 30B-A3B int4, 15 GB | **50.8** |
+| Arc Pro B60, same model, `--offload-ratio 30` | NoLlama/OpenVINO | 30B-A3B int4, 15 GB | ~10.5 — don't |
 | Arc 140V laptop iGPU, `--offload-ratio 30` | NoLlama/OpenVINO | 30B-A3B int4, 15 GB | 25.3 |
 | 24-core desktop CPU (64 GB RAM), model fits | NoLlama/OpenVINO | 30B-A3B int4 | 23.7 |
 | 24-core desktop CPU, model **bigger than RAM** | NoLlama/OpenVINO | Coder-Next int8, **74 GB** | 9-11.5 |
 | 8-core laptop CPU (LPDDR5X) | NoLlama/OpenVINO | 30B-A3B int4 | 9.1 |
 | Non-XMX desktop iGPU | — | any big MoE | won't load |
 
-Takeaways: a dedicated CUDA card is still ~3× the best Intel route — but
+Note the two B60 rows: same card, same model, and the only difference is a flag.
+Offload is not a performance feature, it is a way to run something that otherwise
+would not — and on a card with room it costs 5×.
+
+Takeaways: a dedicated CUDA card is now ~1.4× the best Intel route — but
 every Intel row above is *usable*, runs on hardware you may already own,
 and two of them (offload, bigger-than-RAM CPU) were impossible before
 OpenVINO 2026.3 and the MoE era. Decode is the whole story here; on

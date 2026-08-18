@@ -3,6 +3,27 @@
 Carried over after the optimum-backend merge (2026-08-13); everything else
 from that branch's checklist shipped or is recorded in README/TODONT.
 
+- **Arc dGPU benchmarks: DONE 2026-08-18.** The README's dGPU column is filled
+  (SmolLM3 77.9, Qwen3-8B 64.5, 30B-A3B 50.8 resident, `count 1-100` test, Arc
+  Pro B60). Two things worth carrying forward:
+  - **Re-measure the older rows.** They were taken with a benchmark harness
+    whose TTFT included stream buffering, so their decode figures read a few
+    percent high, and Windows TTFT measured before the dual-stack bind carried
+    a fixed ~2 s loopback penalty. The dGPU row is the only one measured
+    cleanly. Cross-row TTFT comparison is not meaningful until the rest are
+    redone — the README says so, but the numbers themselves are still old.
+  - **Offload non-determinism is unexplained.** Under `--offload-ratio 30` on
+    the B60, greedy decoding returned 87-2040 tokens for the same prompt across
+    five runs (resident: 478 every time). Recorded in TODONT and the README as
+    an observation. Nobody has looked at whether the *content* is wrong or
+    merely different.
+- **Benchmark harness gotcha, for whoever automates this next:** a venv built
+  from the Microsoft Store Python has a redirector at `venv\Scripts\python.exe`,
+  so `Start-Process -PassThru` hands back the launcher's pid, not the server's.
+  Killing it leaves the port held, the next server fails to bind, and the
+  benchmark silently keeps talking to the previous model. `bench-b60.ps1` now
+  kills by port owner and asserts `/health` reports the expected model. Any new
+  orchestration script needs both.
 - Qwen3.5-4B vision verdict for the registry note (models.json).
 - SmolLM3 registry notes could mention thinking-mode + `/no_think`.
 - Nemotron Lightning: still blocked upstream (PR #1789 merged descoped — no
