@@ -93,9 +93,36 @@ the docs — this file is only what's still open.
   above, on 2026.3 release AND 2026.4 nightly) — undocumented, not
   unsupported. The issue also flags the slow cold CB prefill (~54s vs ~9s
   plain, same prompt/HW) as an observation; if Intel asks, offer the
-  standalone repro. Separate, smaller: the plain-pipeline first-33k-request
-  USM OOM still needs a clean repro before it's filable. (Track: Intel has
-  historically fixed our reports within a day.)
+  standalone repro. (Track: Intel has historically fixed our reports
+  within a day.)
+
+- **USM OOM: repro'd standalone, mechanism identified — issue draft ready.**
+  Raw VLMPipeline (plain, no scheduler_config), Glimmer int4 on the B60:
+  first ~33k-token generate fails with a USM Device allocation error;
+  identical retry succeeds. 100% reproducible, with or without short
+  generates first. Both observed failure sizes divide by exactly 1.1:
+  16,049,884,928 = 14,590,804,480 × 1.1 and 16,031,296,512 =
+  14,573,905,920 × 1.1 — the GPU plugin's ShapePredictor "percentage
+  preallocation" (`buffers_preallocation_ratio = 1.1`, options.inl:61)
+  applied to a huge dynamic buffer (full-sequence logits or attention
+  scratch). The CB path avoids it because chunked prefill never allocates
+  the full-sequence buffer — consistent with scheduler_config being the
+  workaround AND with CB's slower cold prefill. Bonus bug found while
+  testing: setting `OV_GPU_SHAPE_PREDICTOR_SETTINGS` (a RELEASE_INTERNAL
+  option) crashes pipeline construction — `ShapePredictor::Settings` has no
+  string parser ("Bad as from std::string"), so the env knob is unusable
+  and a bad value kills the load. Weight staging through host/shared memory
+  is by design (two-stage allocation, memory_allocation_gpu_plugin.md); no
+  public knob for device-direct loading; `usm_policy`/`disable_usm` are
+  debug-caps-only. Windows "shared GPU memory" is the WDDM half-of-RAM
+  budget — discrete GPUs have it too, no iGPU required.
+
+- **Local sparse checkouts of Intel sources** (for grepping docs + GPU
+  plugin internals): `C:\devel\intel\openvino` (docs/articles_en +
+  src/plugins/intel_gpu, shallow) and `C:\devel\intel\openvino.genai`
+  (site + src). Machine has no git-lfs — clone with
+  `GIT_LFS_SKIP_SMUDGE=1` and LFS filters disabled; partial-clone sparse
+  blob fetch dies on this network, plain `--depth 1` works.
 
 - **Loading a big model stages through host memory first.** Watched on the B60
   (17 GB Glimmer): shared GPU memory ramps to near its 16 GB ceiling and holds
