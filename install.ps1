@@ -34,8 +34,39 @@ param(
     [string]$HfToken,
     [switch]$Nightly,
     # Override if the nightly index moves, or point at a local wheel dir.
-    [string]$NightlyIndex = "https://storage.openvinotoolkit.org/simple/wheels/nightly"
+    [string]$NightlyIndex = "https://storage.openvinotoolkit.org/simple/wheels/nightly",
+    # Catch-all. 'pwsh -File install.ps1 -Unknown' does NOT error: it binds what
+    # it recognises, drops the rest, and runs with exit 0. Passing -Nightly to a
+    # checkout that predates it therefore looked like success while building the
+    # STABLE venv (hit twice, 2026-08-18).
+    [Parameter(ValueFromRemainingArguments = $true)]
+    [string[]]$ExtraArgs
 )
+
+if ($ExtraArgs) {
+    Write-Host "ERROR: unrecognized argument(s): $($ExtraArgs -join ', ')" -ForegroundColor Red
+    Write-Host "  Flags: -Nightly -SkipModel -HfToken <token> -NightlyIndex <url>" -ForegroundColor Yellow
+    Write-Host "  If you expected one of these, check you are on a branch that has it:" -ForegroundColor Yellow
+    Write-Host "    git branch --show-current" -ForegroundColor Yellow
+    exit 1
+}
+
+# Drop PATH entries this session cannot traverse. Windows refuses to cross a
+# user-created junction under a network logon (an SSH session), and pip walks
+# PATH during install: it dies with ERROR_UNTRUSTED_MOUNT_POINT / WinError 448.
+# The OpenAI Codex CLI ships exactly such a junction at
+# %LOCALAPPDATA%\Programs\OpenAI\Codexin. Probed rather than name-matched,
+# so any future offender is handled too. Interactive installs never see this.
+$badPath = @()
+$env:Path = (($env:Path -split ';') | Where-Object {
+    if (-not $_) { return $false }
+    try { Get-ChildItem -LiteralPath $_ -ErrorAction Stop | Out-Null; $true }
+    catch { $script:badPath += $_; $false }
+}) -join ';'
+if ($badPath) {
+    Write-Host "[i] Ignoring $($badPath.Count) untraversable PATH entry/entries for this install:" -ForegroundColor DarkGray
+    $badPath | ForEach-Object { Write-Host "      $_" -ForegroundColor DarkGray }
+}
 
 $ErrorActionPreference = "Stop"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
