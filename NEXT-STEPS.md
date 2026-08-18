@@ -5,6 +5,57 @@ the docs — this file is only what's still open.
 
 ## Open
 
+- **Glimmer runs on the GenAI path now — reroute it.** Intel published an
+  official OpenVINO export on 2026-08-12
+  (`OpenVINO/Muse-Glimmer-30B-int4-ov`, 17 GB, INT4_ASYM g64) and it is
+  **VLM-shaped**: separate vision / text / language IRs. Verified 2026-08-18 on
+  the B60 via `openvino_genai.VLMPipeline` on **GPU**: loads, quotes the
+  instruction back verbatim, answers 2+2 correctly, ~14 tok/s (against 8-11 on
+  the optimum path). No optimum backend, no transformers-from-git, and the
+  optimum-path GPU corruption never applied to GenAI.
+
+  `NEEDS_OPTIMUM = {"muse_glimmer", "nemotron_h"}` (nollama.py:129) now blocks
+  this. Its stated reason — *"muse_glimmer's language model takes inputs_embeds
+  (no LLMPipeline)"* — is an argument about **LLMPipeline**; a VLM-shaped export
+  goes to **VLMPipeline**, which feeds a language model from embeddings by
+  design. Fix is structural, not a special case: **`is_vlm` should override the
+  architecture blocklist**, which keeps our own LLM-shaped export on optimum
+  where it belongs.
+
+  Still needs the nightly runtime — Intel exported it with a
+  `2026.4.0-...-muse_onyx` build and the card wants 2026.3.1+ with a genai
+  pre-release. So Glimmer's stack gate becomes **"2026.4 ships stable"** rather
+  than "muse_glimmer in released transformers", which is the same gate Qwen3.8
+  is already waiting on. Note VLM slots get no prefix cache (the CB backend is
+  LLM-only), so that win does not arrive with this.
+
+- **The ATEM filter cannot simply be ported to the GenAI path.**
+  `_AtemStreamFilter` keys on `<|start|>`, `<|message|>`, `<|eom|>`, `<|eot|>`.
+  `VLMPipeline.generate()` strips special tokens and `GenerationConfig` has no
+  `skip_special_tokens` (only `Tokenizer.decode` does, which the pipeline does
+  not expose). What survives is the plain-text routing — `to=self`,
+  `assistant to=user` — so a GenAI-path filter has to parse bare words that
+  could legitimately appear in content. More fragile than the existing one.
+  Gate it on the flag that already exists (`model_type == "muse_glimmer"`,
+  nollama.py:1881) rather than adding a second one.
+
+  This is not an Intel bug: stripping special tokens is correct detokenisation,
+  and the routing words are plain text the model emitted. Serving a
+  harmony-channel model is the application's job — vLLM and TGI would show the
+  same thing.
+
+- **Loading a big model stages through host memory first.** Watched on the B60
+  (17 GB Glimmer): shared GPU memory ramps to near its 16 GB ceiling and holds
+  there while dedicated VRAM stays flat, then dedicated fills, then shared
+  drains. So **peak host RAM during load is roughly model-sized even on a
+  discrete card** — worth knowing before assuming 24 GB of VRAM makes system RAM
+  irrelevant.
+
+- **`hf download` stalls on large files via Xet.** It sat at 0.00 CPU with a
+  `.lock` on the 14.9 GB blob. `HF_HUB_DISABLE_XET=1` resumed it and ran at
+  ~78 MB/s. Also leaves an abandoned partial in `.cache/huggingface/download`
+  that has to be deleted by hand (17 GB of files, 28.7 GB on disk until then).
+
 - **Glimmer into `install.ps1`/`models.json`: waits for OpenVINO 2026.4 as a
   *release*.** Standing rule: leading edge, not bleeding edge. The device gate
   closed on the 2026.4 nightly (GPU output correct, 8-11 tok/s), but a menu item
