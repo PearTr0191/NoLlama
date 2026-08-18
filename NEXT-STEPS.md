@@ -86,16 +86,16 @@ the docs — this file is only what's still open.
   - The "minutes of prefill" worry for agent prompts was wrong for the B60
     class: 33k tokens prefill in ~9s on the plain pipeline.
 
-- **Intel docs gap — worth a short upstream issue (awaiting go).** The
-  VLMPipeline API docs describe its kwargs only as "Device properties" and
-  never mention `scheduler_config`/prefix caching; the GenAI guide shows
+- **Intel docs gap — filed upstream as openvino.genai#4343 (2026-08-18).**
+  The VLMPipeline API docs describe its kwargs only as "Device properties"
+  and never mention `scheduler_config`/prefix caching; the GenAI guide shows
   SchedulerConfig on LLMPipeline only. The feature works (our measurements
-  above, on 2026.3 release AND 2026.4 nightly), and OVMS docs already
-  advertise continuous-batching VLM serving — so this is undocumented, not
-  unsupported. A "please document scheduler_config on VLMPipeline" issue on
-  openvino.genai with our numbers would help others find it. Separate,
-  smaller: the plain-pipeline first-33k-request USM OOM needs a clean repro
-  before it's filable.
+  above, on 2026.3 release AND 2026.4 nightly) — undocumented, not
+  unsupported. The issue also flags the slow cold CB prefill (~54s vs ~9s
+  plain, same prompt/HW) as an observation; if Intel asks, offer the
+  standalone repro. Separate, smaller: the plain-pipeline first-33k-request
+  USM OOM still needs a clean repro before it's filable. (Track: Intel has
+  historically fixed our reports within a day.)
 
 - **Loading a big model stages through host memory first.** Watched on the B60
   (17 GB Glimmer): shared GPU memory ramps to near its 16 GB ceiling and holds
