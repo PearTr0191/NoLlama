@@ -42,11 +42,16 @@ transcription, and every flag: [docs/API.md](docs/API.md).
 
 ## What to expect
 
-Small models are for bounded work — summarise this, extract these fields, answer
-from this text. Asked for the capital of Norway, a 1.5B once replied that
-"Norway is a small island". Good for testing the plumbing, not for geography.
-Use Qwen3-8B or larger for real chat, and prefer INT8 over INT4 when quality
-matters more than speed.
+**On a GPU or iGPU: usable now.** Qwen3-8B runs at conversational speed, a 30B
+MoE fits a 24 GB card, and both drive agent loops with tool-calling.
+
+**On the NPU: not quite yet.** It tops out at 1-3B-class models. SmolLM3-3B at
+23 tok/s is genuinely pleasant for bounded work — summarise this, extract these
+fields — without being a daily driver. That gap is closing fast, and the NPU is
+the part of this that gets interesting.
+
+Below ~3B, expect trouble. Asked for the capital of Norway, a 1.5B once answered
+that "Norway is a small island". Fine for testing the plumbing.
 
 ## Speed at a glance
 
