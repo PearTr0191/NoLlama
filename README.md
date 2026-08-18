@@ -450,13 +450,19 @@ the `count 1-100` test as the steady-state decode metric.
 | Decode tok/s (2+2, thinking) | 18.6 | 11.2 |
 | TTFT (prefill) | 3.2s ⚠ | 1.85s ⚠ |
 
-⚠ **Both TTFT figures are unreliable and neither side wins on them.** They came
-from a harness that counted a fixed loopback delay plus the first ~20 generated
-tokens as prefill. Re-measured on the desktop iGPU (2026-08-18, same OpenVINO),
-NoLlama's TTFT on this class of model is **~0.2 s, not 3-4 s** — a 19×
-difference. Ollama's number went through the same harness and has not been
-re-measured, so the honest position is that this row says nothing until both
-sides are redone. The decode row is unaffected and reproduces.
+⚠ **The TTFT row is withdrawn; do not read a winner from it.** NoLlama's 3.2 s
+was mostly measurement artefact — it bound IPv4-only while Windows resolves
+`localhost` to `::1` first, so every request paid a fixed ~2 s failed-connect
+before falling back, on top of ~20 generated tokens being counted as prefill.
+With the dual-stack bind (2026-08-18) NoLlama measures **0.12 s** on this iGPU.
+Ollama binds dual-stack and never paid that cost, and its TTFT proves
+insensitive to the harness fix (RTX 5090: 0.19 s before, 0.20 s after), so its
+1.85 s here is probably real Vulkan prefill.
+
+Taken at face value that reverses the row — but nobody has measured Ollama on
+this iGPU since, and a claim in our own favour deserves a fresh measurement
+rather than arithmetic. So: no TTFT winner is claimed. **The decode row is
+unaffected**, reproduces on re-measurement, and is the comparison that matters.
 
 **NoLlama's OpenVINO GPU path is ~1.6× faster on decode.** Two caveats that
 matter in practice:
