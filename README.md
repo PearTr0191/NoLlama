@@ -121,6 +121,7 @@ Setup for both: **[docs/AGENTS.md](docs/AGENTS.md)**.
 | [docs/BENCHMARKS.md](docs/BENCHMARKS.md) | Methodology, all numbers, MoE offload, vs Ollama and OVMS |
 | [docs/AGENTS.md](docs/AGENTS.md) | Copilot and OpenClaw setup |
 | [docs/INTERNALS.md](docs/INTERNALS.md) | Architecture, file layout, known limitations |
+| [docs/DIAGRAMS.md](docs/DIAGRAMS.md) | Logic diagrams of the core flows (request routing, slot lifecycle, token streaming, web UI rendering) — machine-checked against the code, so a diagram that's fallen behind gets flagged, not trusted |
 
 ## Known limitations
 
