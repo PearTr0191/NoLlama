@@ -162,6 +162,12 @@ _GENERIC_DIR_NAMES = ("model", "models", "gpu-model", "npu-model", "")
 
 
 def _strip_name_suffixes(name):
+    """Drop export-format suffixes (-ov, -int4, ...) from a display name.
+
+    Why: the suffix describes the export, not the model — see _NAME_SUFFIXES.
+    In: any name. Out: the name with each matching suffix removed once, in
+    _NAME_SUFFIXES order (case-insensitive match, original casing kept).
+    """
     for suffix in _NAME_SUFFIXES:
         if name.lower().endswith(suffix):
             name = name[: -len(suffix)]
@@ -245,13 +251,21 @@ def pil_to_tensor(img, max_dim):
 # the next turn's history — clients echo assistant content as-is. It must not
 # reach the model again: Muse Glimmer reasons on a separate ATEM channel, so
 # <think> text inside an assistant-to-user turn reads as a corrupted transcript
-# (observed: the model calls a clean follow-up question "garbled nonsense"),
+# ([OBSERVED 2026-08-13, Glimmer] the model calls a clean follow-up question
+# "garbled nonsense"),
 # and for every model it burns prompt tokens on stale reasoning. Leading block
 # only — that's where our stream filter puts it; anything later is quoted text.
 _LEADING_THINK_RE = re.compile(r"^\s*<think>.*?</think>\s*", re.DOTALL)
 
 
 def _strip_history_think(role, text):
+    """Remove OUR echoed <think> block from an assistant history turn.
+
+    Why: clients echo assistant content verbatim, so reasoning we emitted
+    comes back in the next request — see _LEADING_THINK_RE above for the
+    observed damage. In: role + text. Out: text, with only a LEADING think
+    block removed on assistant turns (anything later is quoted text).
+    """
     if role == "assistant":
         return _LEADING_THINK_RE.sub("", text, count=1)
     return text
@@ -601,6 +615,12 @@ def describe_model(model_dir):
 
 
 def _is_model_dir(path):
+    """True when the directory holds an OpenVINO model (any top-level IR).
+
+    In: a directory path. Out: bool — matches LLM (openvino_model.xml),
+    VLM (openvino_language_model.xml) and Whisper (openvino_encoder_model.xml)
+    exports alike.
+    """
     return any(os.path.isfile(os.path.join(path, f)) for f in
                ("openvino_model.xml", "openvino_language_model.xml",
                 "openvino_encoder_model.xml"))
@@ -1183,6 +1203,12 @@ class DeviceSlot:
     backend = "genai"  # which runtime serves this slot (surfaced in /health)
 
     def __init__(self, device_name, device_id=None):
+        """Bare slot, nothing loaded; every field's meaning is inline below.
+
+        In: canonical device kind ("NPU"/"GPU"/"CPU") plus the OpenVINO id
+        when they differ (multi-GPU: "GPU.1"). Out: a slot in status
+        not_configured — load() + warmup() make it serve.
+        """
         self.device_name = device_name   # canonical "NPU", "GPU", "CPU" (display + routing)
         self.device_id = device_id or device_name  # OpenVINO id (may be "GPU.1" on multi-GPU)
         self.device_full = ""            # "Intel(R) AI Boost"
@@ -1227,8 +1253,8 @@ class DeviceSlot:
 
         # MoE disk offload (--offload-ratio): GPU-only plugin property, and it
         # only does anything on XMX hardware (Arc dGPU, Lunar Lake 140V+) —
-        # verified: Qwen3-30B-A3B int4 runs in 2.35 GB resident at ratio 90 on
-        # a 140V, while non-XMX iGPUs silently ignore it (see TODONT.md).
+        # [OBSERVED 2026-08-06] Qwen3-30B-A3B int4 runs in 2.35 GB resident at
+        # ratio 90 on a 140V, while non-XMX iGPUs silently ignore it (TODONT.md).
         offload = {}
         if OFFLOAD_RATIO > 0 and self.device_name == "GPU":
             offload = {"OFFLOAD_RATIO": OFFLOAD_RATIO}
@@ -1241,7 +1267,7 @@ class DeviceSlot:
                 raise RuntimeError("No VLMPipeline in this openvino_genai build.")
             if PROMPT_CACHE and self.kv_pool_gb and self.device_name in ("GPU", "CPU"):
                 # VLMPipeline honors scheduler_config on current runtimes —
-                # measured 2026-08-18: 2026.3 release (140V, ~9k-token prefix
+                # [OBSERVED 2026-08-18] 2026.3 release (140V, ~9k-token prefix
                 # 21.7s -> 3.9s TTFT) and 2026.4 nightly (B60, 33k-token
                 # prefix 54.5s -> 1.3s). The old "CB backend is LLM-only"
                 # belief was stale. A runtime that rejects the property falls
@@ -1386,6 +1412,13 @@ class DeviceSlot:
                 print(line, flush=True)
 
     def warmup(self):
+        """5-token greedy generate so the first real request isn't the compile.
+
+        Why: the first generate pays kernel compilation / graph init (minutes
+        on some GPU models) — paying it at startup keeps it out of a user's
+        first-turn latency, and a model that can't generate at all fails HERE,
+        visibly, instead of on someone's request. Out: status ready or error.
+        """
         self.status = "warming_up"
         print(f"  [{self.device_name}] Warmup...", end="", flush=True)
         t0 = time.perf_counter()
@@ -1709,6 +1742,8 @@ class DeviceSlot:
 
     @property
     def info(self):
+        """This slot's block in /health — keys are read by start-openclaw.ps1
+        and the web UI, so they are API surface, not just logging."""
         return {
             "status": self.status,
             "model": self.model_name,
@@ -1745,6 +1780,7 @@ class _AtemStreamFilter:
     _END = ("<|eom|>", "<|eot|>", "<|return|>")
 
     def __init__(self):
+        """Fresh filter, one per generation — state below is per-stream."""
         self._buf = ""
         self._in_header = True   # generation prompt ends mid-header
         self._thinking = False
@@ -1759,6 +1795,14 @@ class _AtemStreamFilter:
         return 0
 
     def feed(self, text):
+        """Translate one decoded chunk; safe to call with any split point.
+
+        Why the buffer-and-hold dance: markers split arbitrarily across
+        chunks, so a possible marker prefix at the buffer tail is held back
+        (_held_tail) rather than emitted — emitting half a marker would leak
+        channel soup into the client. In: decoded text WITH special tokens.
+        Out: the translated text ready to emit now ('' while holding).
+        """
         if self._done:
             return ""
         self._buf += text
@@ -1820,8 +1864,8 @@ class _AtemPlainFilter:
     (the prompt ends with '<|start|>assistant'), so the stream opens with
     'to=self' glued straight onto the reasoning, and the channel switch
     arrives as 'assistant to=user' glued onto the answer — the <|eom|><|start|>
-    pair between them detokenizes to nothing. Shape verified against real
-    VLMPipeline output (B60, 2026-08-18).
+    pair between them detokenizes to nothing. [OBSERVED 2026-08-18] shape
+    verified against real VLMPipeline output (B60).
 
     Same surface as _AtemStreamFilter: to=self content -> <think>...</think>,
     to=user -> plain text; ATEM XML tool calls are ordinary text and pass
@@ -1840,6 +1884,7 @@ class _AtemPlainFilter:
     _TOOL_XML = "<atem:function_calls>"
 
     def __init__(self):
+        """Fresh filter, one per generation — state below is per-stream."""
         self._buf = ""
         self._state = "header"  # header -> think | answer
 
@@ -1854,6 +1899,14 @@ class _AtemPlainFilter:
         return best
 
     def feed(self, text):
+        """Translate one detokenized chunk; safe to call with any split point.
+
+        Same hold-back contract as _AtemStreamFilter.feed, but keyed on the
+        plain-text routing words that survive detokenization (see the class
+        docstring for why the markers are gone on this path). In: decoded
+        text, special tokens already stripped. Out: text to emit now
+        ('' while a possible header/switch prefix is held).
+        """
         self._buf += text
         out = []
         while self._buf:
@@ -1953,6 +2006,13 @@ class OptimumSlot(DeviceSlot):
     backend = "optimum"
 
     def __init__(self, device_name, device_id=None):
+        """DeviceSlot fields plus the HF pair; prefix cache off from birth.
+
+        Why supports_prefix_cache=False here and not at load: _resolve_kv_pool
+        and _prewarm_slot consult it, and both can run before/without a
+        successful load — the capability is a property of the backend, not of
+        a loaded model.
+        """
         super().__init__(device_name, device_id)
         self.supports_prefix_cache = False
         self.model = None
@@ -1980,6 +2040,12 @@ class OptimumSlot(DeviceSlot):
         _cml.GLOBAL_WORKERS = 1
 
     def load(self, model_dir):
+        """Load through optimum-intel: integrity check, GPU-corruption warning
+        keyed on the OpenVINO version (issue #37419, fixed in 2026.4), then
+        OVModelForVisualCausalLM for VLM-shaped exports / OVModelForCausalLM
+        for plain LMs — the visual class is structural, needed even for
+        text-only generate on a VLM-shaped export like Glimmer.
+        """
         self.status = "loading"
         self.model_dir = model_dir
         self.model_name = model_display_name(model_dir)
@@ -1998,9 +2064,9 @@ class OptimumSlot(DeviceSlot):
             # Windows), Xe3 (B390, Linux — issue #24) and discrete Battlemage
             # (Arc Pro B60) warmed up fine and SILENTLY computed garbage — the
             # model half-perceives the prompt and greedy-loops, while the same
-            # IR is correct on CPU. Verified fixed on 2026.4.0.dev20260814
-            # (B60, 2026-08-15): the issue's own repro now quotes the prompt
-            # verbatim on GPU. Warn before the compile, which costs minutes.
+            # IR is correct on CPU. [OBSERVED 2026-08-15] fixed on
+            # 2026.4.0.dev20260814 (B60): the issue's own repro now quotes the
+            # prompt verbatim on GPU. Warn before the compile, which costs minutes.
             try:
                 import openvino as _ov
                 _ov_ver = _ov.__version__
@@ -2056,6 +2122,12 @@ class OptimumSlot(DeviceSlot):
         self.pipe = self.model  # inherited ensure_loaded/unload key on .pipe
 
     def _stopping_criteria(self):
+        """Cancel hook for transformers generate — polls slot._cancel.
+
+        Why: this backend has no streamer-callback return-True protocol, so
+        /v1/cancel needs a StoppingCriteria instead. Checked per decode step —
+        same limitation as GenAI: a blocked prefill can't be interrupted.
+        """
         from transformers import StoppingCriteria, StoppingCriteriaList
 
         slot = self
@@ -2086,6 +2158,8 @@ class OptimumSlot(DeviceSlot):
             pad_token_id=self.tokenizer.eos_token_id, **hf_kwargs)
 
     def warmup(self):
+        """Same contract as DeviceSlot.warmup, via _generate_unlocked because
+        ensure_loaded() calls this while already holding self.lock."""
         self.status = "warming_up"
         print(f"  [{self.device_name}] Warmup...", flush=True)
         t0 = time.perf_counter()
@@ -2158,12 +2232,17 @@ class OptimumSlot(DeviceSlot):
         return "".join(chunks).strip()
 
     def generate_vlm(self, text_prompt, images, gen):
+        """Refuse loudly: the routes reject images first (model_type is 'llm'),
+        so reaching this means a routing bug — fail, don't improvise."""
         raise RuntimeError("vision path not enabled on the optimum backend yet")
 
     def stream_vlm(self, text_prompt, images, gen, completion_id, created, t0):
+        """Refuse loudly — same contract as generate_vlm above."""
         raise RuntimeError("vision path not enabled on the optimum backend yet")
 
     def unload(self):
+        """Idle unload: also drop the HF model/tokenizer refs — .pipe aliases
+        .model here, so clearing only .pipe would keep the weights alive."""
         if self.pipe is None:
             return
         self.model = None
@@ -2198,6 +2277,9 @@ class WhisperSlot:
     """Holds a WhisperPipeline for speech-to-text."""
 
     def __init__(self, device_name, device_id=None):
+        """Bare STT slot. Deliberately NOT a DeviceSlot: no last_used/unload,
+        which is what exempts it from the idle watchdog (see _idle_watchdog's
+        getattr check) — a Whisper model is small enough to keep loaded."""
         self.device_name = device_name
         self.device_id = device_id or device_name
         self.device_full = ""
@@ -2208,6 +2290,8 @@ class WhisperSlot:
         self.lock = threading.Lock()
 
     def load(self, model_dir):
+        """Build the WhisperPipeline; fails with an upgrade hint on builds
+        that predate it rather than an AttributeError."""
         self.status = "loading"
         self.model_name = model_display_name(model_dir)
         print(f"  [{self.device_name}] Loading Whisper ({self.model_name})...",
@@ -2221,6 +2305,8 @@ class WhisperSlot:
         self.pipe = WhisperPipe(str(model_dir), self.device_id)
 
     def warmup(self):
+        """No warm-up generate: Whisper compiles fast and a fake transcription
+        needs fake audio — just flip to ready."""
         self.status = "ready"
         print(f"  [{self.device_name}] Whisper ready", flush=True)
 
@@ -2238,6 +2324,7 @@ class WhisperSlot:
 
     @property
     def info(self):
+        """The whisper block in /health (subset of DeviceSlot.info)."""
         return {
             "status": self.status,
             "model": self.model_name,
@@ -2319,6 +2406,8 @@ _request_counter = itertools.count(1)  # thread-safe id generator
 
 
 def make_id():
+    """Short sequential completion id ("arc-0001") — greppable in the console
+    log, unlike a UUID; itertools.count is thread-safe without a lock."""
     return f"arc-{next(_request_counter):04d}"
 
 
@@ -2337,6 +2426,8 @@ def overall_status():
 
 
 def openai_error(message, error_type="invalid_request_error", status=400):
+    """OpenAI-shaped error body — clients parse error.message, so a bare
+    string or Flask default page would surface as 'unknown error'."""
     return jsonify({"error": {"message": message, "type": error_type}}), status
 
 
@@ -2585,6 +2676,11 @@ def _prewarm_slot(slot):
 # ---------------------------------------------------------------------------
 
 def _log_request(api_label):
+    """--debug dump of an inbound request (method, path, UA, pretty body).
+
+    Why the UA line: half of all client-compat bugs (#19, #24, Copilot picker)
+    start with 'which client sent this shape?' — the body alone doesn't say.
+    """
     if not debug:
         return
     body_raw = request.get_data(as_text=True)
@@ -2602,6 +2698,7 @@ def _log_request(api_label):
 
 @app.before_request
 def _debug_openai():
+    """Tag --debug dumps from the OpenAI-port app (see _log_request)."""
     _log_request("OpenAI")
 
 
@@ -2611,11 +2708,14 @@ def _debug_openai():
 
 @app.route("/")
 def gui():
+    """The chat web UI (templates/index.html + static/)."""
     return render_template("index.html")
 
 
 @app.route("/health", methods=["GET"])
 def health():
+    """Liveness + per-slot state. Contract notes are inline below; the
+    field set is consumed by start-openclaw.ps1 and the web UI status dot."""
     devices = {}
     if primary and primary.status != "not_configured":
         devices[primary.device_name.lower()] = primary.info
@@ -2642,6 +2742,8 @@ def health():
 
 @app.route("/v1/models", methods=["GET"])
 def list_models():
+    """OpenAI model list. Ids are "name@DEVICE" so a dual-mode setup exposes
+    both slots distinctly; _route_request accepts either form back."""
     data = []
     for slot in (primary, secondary):
         if slot and slot.status == "ready":
@@ -2715,6 +2817,10 @@ def audio_transcriptions():
 
 @app.route("/v1/chat/completions", methods=["POST"])
 def chat_completions():
+    """The main OpenAI chat endpoint — parse, route, gate tools, then pick one
+    of the generation paths. docs/request-flow.mmd is the map of this
+    function; the inline comments below carry the per-branch why.
+    """
     if overall_status() != "ready":
         return openai_error(
             f"Server not ready (status: {overall_status()}). "
@@ -2937,27 +3043,33 @@ OLLAMA_PORT = 11434
 
 @ollama_app.before_request
 def _debug_ollama():
+    """Tag --debug dumps from the Ollama-port app (see _log_request)."""
     _log_request("Ollama")
 
 
 @ollama_app.route("/")
 def ollama_health():
+    """The exact plain-text string Ollama serves at / — clients (and our own
+    _identify_ollama) probe for it verbatim."""
     return "Ollama is running"
 
 
 @ollama_app.route("/api/version", methods=["GET"])
 def ollama_version():
-    # Two callers, two answers. --vscode-compat gets a plausible Ollama version
-    # because VS Code validates the field (see VSCODE_OLLAMA_VERSION). Everyone
-    # else gets our real version, prefixed so no client mistakes us for Ollama.
-    # It used to report a hardcoded "nollama-0.1.0" here, which stopped being
-    # true a long time ago.
+    """Two callers, two answers. --vscode-compat gets a plausible Ollama
+    version because VS Code validates the field (see VSCODE_OLLAMA_VERSION);
+    everyone else gets our real version, prefixed so no client mistakes us
+    for Ollama. It used to report a hardcoded "nollama-0.1.0" here, which
+    stopped being true a long time ago.
+    """
     version = VSCODE_OLLAMA_VERSION if vscode_compat else f"nollama-{__version__}"
     return jsonify({"version": version})
 
 
 @ollama_app.route("/api/tags", methods=["GET"])
 def ollama_tags():
+    """Ollama's model list. Names are bare (no @DEVICE): Ollama clients echo
+    the name straight back in requests, and Copilot's picker shows it."""
     models = []
     for slot in (primary, secondary):
         if slot and slot.status == "ready":
@@ -2976,6 +3088,9 @@ def ollama_tags():
 
 @ollama_app.route("/api/show", methods=["POST"])
 def ollama_show():
+    """Per-model metadata; the capabilities list is the load-bearing part —
+    'tools' only on GPU/CPU slots so Copilot won't offer NPU models for
+    agent mode (inline comments below carry the client quirks)."""
     body = request.get_json(silent=True) or {}
     model_name = body.get("model", "")
 
@@ -3009,6 +3124,12 @@ def ollama_show():
 
 @ollama_app.route("/api/chat", methods=["POST"])
 def ollama_chat():
+    """Ollama chat endpoint — translates Ollama message shape (images[] as
+    bare base64, options.num_predict/temperature) into the internal one and
+    mirrors chat_completions' flow; docs/request-flow.mmd maps both. Kept
+    separate rather than adapted onto chat_completions: the response framing
+    (ndjson vs SSE, arguments-as-object) differs at every exit point.
+    """
     if overall_status() != "ready":
         return jsonify({"error": "model not ready"}), 503
 
@@ -3346,23 +3467,27 @@ def _ollama_stream_generate(slot, raw_messages, gen, t0):
 # Stubs — clients expect these to exist
 @ollama_app.route("/api/pull", methods=["POST"])
 def ollama_pull():
+    """Stub: models are installed on disk, not pulled — claim success so
+    clients that pull-before-chat don't refuse to proceed."""
     return jsonify({"status": "success"})
 
 
 @ollama_app.route("/api/delete", methods=["DELETE"])
 def ollama_delete():
+    """Stub: never delete a model directory on an API call."""
     return "", 200
 
 
 @ollama_app.route("/api/copy", methods=["POST"])
 def ollama_copy():
+    """Stub: model management is the filesystem's job here."""
     return "", 200
 
 
-# Copilot Chat 0.53+ sends actual chat via /v1/chat/completions on the Ollama
-# port rather than /api/chat — delegate to the same handler.
 @ollama_app.route("/v1/chat/completions", methods=["POST"])
 def ollama_v1_chat_completions():
+    """Copilot Chat 0.53+ sends actual chat via /v1/chat/completions on the
+    Ollama port rather than /api/chat — delegate to the same handler."""
     return chat_completions()
 
 
@@ -3374,6 +3499,9 @@ class _ExclusiveThreadedWSGIServer(ThreadedWSGIServer):
     """Exclusive on the port, and listening on IPv4 *and* IPv6."""
 
     def server_bind(self):
+        """Bind with SO_EXCLUSIVEADDRUSE and dual-stack IPv6 — each block
+        below states the failure it prevents (port splitting; the ~2s
+        localhost-IPv6 tax)."""
         if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
             # Werkzeug enables SO_REUSEADDR by default. On Windows that permits
             # a later, more-specific bind to split traffic on the same port.
@@ -3386,7 +3514,7 @@ class _ExclusiveThreadedWSGIServer(ThreadedWSGIServer):
             # Windows getaddrinfo("localhost") returns ::1 FIRST, so against an
             # IPv4-only listener every localhost client attempts IPv6, waits for
             # the connect to fail, and only then falls back to 127.0.0.1.
-            # Measured on Windows 11 + Python urllib (2026-08-18, Arc B60 box):
+            # [OBSERVED 2026-08-18] Windows 11 + Python urllib (Arc B60 box):
             # 2.05 s per request via localhost vs 0.015 s via 127.0.0.1 — a
             # fixed ~2 s tax that looks exactly like slow prefill and hides in
             # TTFT. start-openclaw.ps1 and the startup banner both hand out
@@ -3396,6 +3524,11 @@ class _ExclusiveThreadedWSGIServer(ThreadedWSGIServer):
 
 
 def _serve_app(flask_app, port):
+    """Serve one Flask app forever on the exclusive dual-stack server.
+
+    Why not app.run(): werkzeug's default server lacks the bind semantics
+    _ExclusiveThreadedWSGIServer exists for (see its server_bind).
+    """
     # "::" with V6ONLY off accepts IPv4 and IPv6 alike. Fall back to IPv4-only
     # where IPv6 is disabled outright, rather than failing to start.
     try:
@@ -3567,6 +3700,8 @@ def _load_in_background(slot, model_dir, devices, port, ollama_port, banner_slot
 # ---------------------------------------------------------------------------
 
 def parse_args():
+    """CLI definition — the help strings are the user documentation for every
+    flag, so behavior notes live there rather than here."""
     p = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -3653,6 +3788,10 @@ def parse_args():
 
 
 def main():
+    """Startup sequence: flag policy, port checks, device detection, slot
+    construction, background loads, then Flask on the main thread.
+    docs/slot-lifecycle.mmd maps this; numbered comments below mark the steps.
+    """
     global primary, secondary, whisper_slot, max_dim, debug, vscode_compat
     global PROMPT_CACHE, PROMPT_CACHE_GB, PREWARM_FILE, OFFLOAD_RATIO
     global VSCODE_OLLAMA_VERSION
