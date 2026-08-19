@@ -96,6 +96,26 @@ the docs — this file is only what's still open.
   standalone repro. (Track: Intel has historically fixed our reports
   within a day.)
 
+- **Gemma 3 + prefix cache on 2026.3: sanity-check output quality. Defer any
+  code change until the 2026.4 release is tested.** Fallout from Wovchena's
+  reply on #4343 (2026-08-19): he pointed at `benchmark_vlm.py`, whose inline
+  comment says CB is "not default for Qwen2VL, Qwen2.5VL, Gemma3 due to
+  accuracy issues". Source truth is narrower: on `releases/2026/3`,
+  `requires_sdpa()` (`src/cpp/src/visual_language/pipeline.cpp`) forces the
+  plain SDPA backend by default for **GEMMA3 + GEMMA4_UNIFIED only** (Intel
+  tickets 171180 / 189844) — the Qwen2/2.5-VL part of the sample comment is
+  already stale. Crucially the guard only covers the *default* path: passing
+  `scheduler_config` takes the `explicitly_requires_paged_attention` branch
+  and bypasses it — so NoLlama's prefix caching on a Gemma 3 slot on 2026.3
+  overrides an upstream accuracy safeguard. On master, `requires_sdpa()` is a
+  stub returning false (CB default for every VLM), i.e. upstream considers it
+  fixed for 2026.4. Asked in #4343 whether explicit `scheduler_config` on
+  Gemma3/2026.3 actually hits ticket 171180 or only the default selection.
+  Action: quick output-quality check of Gemma 3 4B Vision with caching on vs
+  `--no-prompt-cache` on the 2026.3 release. **No code change now** — if
+  2026.4 ships with the guard gone, the whole concern evaporates; a
+  model-family special case in `nollama.py` would be dead on arrival.
+
 - **USM OOM: filed upstream as openvino.genai#4344 (2026-08-18).**
   Raw VLMPipeline (plain, no scheduler_config), Glimmer int4 on the B60:
   first ~33k-token generate fails with a USM Device allocation error;
