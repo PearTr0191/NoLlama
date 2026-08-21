@@ -3,6 +3,41 @@
 Things we tried that didn't work, or that work but aren't worth doing. Each
 entry explains *why not* so we don't re-litigate it in six months.
 
+## Untracking the model-watch state file (2026-08-18 -> reverted 2026-08-21)
+
+Idea: `scripts/seen_models.json` is `model_watch.py`'s state. It churned on
+every branch and showed up in four merge diffs for no reason, so cc387fc
+gitignored and untracked it, leaving the file on disk.
+
+**Verdict:** reverted. The GitHub Action cannot work without it tracked. Do
+not untrack it again.
+
+**Why not:**
+- `.github/workflows/model-watch.yml` finishes with `git add
+  scripts/seen_models.json` + `git push`. `git add` on an ignored, untracked
+  path is a **fatal error** ("The following paths are ignored by one of your
+  .gitignore files"), so the last step fails and every run ends red.
+- Worse, the run is already useless before it goes red. A CI checkout has no
+  state file, so `model_watch.py` reads nothing, falls into `seen = set()`,
+  and takes the `baseline` branch: it prints "Baseline established", returns
+  0, and **never sets `new=true`**. No issue is ever opened again. The
+  notifier silently stops notifying, and the only visible symptom is a red X
+  on a `git` step that reads like a permissions hiccup.
+- The state has to survive a week between scheduled runs. `actions/cache` is
+  the obvious alternative, but a cache miss reproduces exactly the
+  silent-baseline failure above — trading a visible cosmetic problem for an
+  invisible correctness one.
+
+The churn complaint was real but cosmetic, and has a proper fix:
+`.gitattributes` marks the file `linguist-generated=true`, which collapses it
+in GitHub diffs while keeping it tracked.
+
+Caught before it bit. The untrack landed Tuesday 2026-08-18, after that
+Monday's run (the one that opened #29), so the next scheduled run — Monday
+2026-08-24 — would have been the first broken one. Restored snapshot is
+byte-identical to 500a15c, the last state CI committed, so nothing gets
+re-reported.
+
 ## GigaChat-20B-A3B conversion (2026-08-13, issue #27)
 
 Idea: Dmitriy Teteruk tried converting `ai-sage/GigaChat-20B-A3B-base`

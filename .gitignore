@@ -19,5 +19,6 @@ venv-optimum/
 keys.ini
 nollama.ini
 
-# Runtime state from scripts/model_watch.py — churns on every run
-scripts/seen_models.json
+# NOTE: scripts/seen_models.json is model_watch.py state, but it must stay
+# TRACKED -- .github/workflows/model-watch.yml commits it back, and without it
+# every run re-baselines and silently stops opening issues. See TODONT.md.
