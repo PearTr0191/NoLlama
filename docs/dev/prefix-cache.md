@@ -39,13 +39,37 @@ cannot perform the SDPAToPagedAttention transformation.
 ```
 
 Measured 2026-08-21 on the B60 / 2026.3 release across Intel's three Gemma 4
-exports — and it tracks the **exporter**, not the model size:
+exports. The tell is static — count the ops in the language model's `.xml`:
 
-| IR | exported with | CB backend |
-|---|---|---|
-| `gemma-4-E2B-it-int4-ov` | transformers 5.5.4 | builds |
-| `gemma-4-26b-a4b-it-int4-ov` | transformers 5.5.4 | builds |
-| `gemma-4-E4B-it-int8-ov` | transformers **5.5.0** | **refuses** |
+| IR | SDPA ops | SoftMax ops | CB backend |
+|---|---|---|---|
+| `gemma-4-E2B-it-int4-ov` | 35 (= layers) | 0 | builds |
+| `gemma-4-26b-a4b-it-int4-ov` | 30 (= layers) | 0 | builds |
+| `gemma-4-E4B-it-int8-ov` | **0** | **42** | **refuses** |
+
+```bash
+grep -c 'ScaledDotProductAttention' openvino_language_model.xml   # want: one per layer
+```
+
+One fused SDPA node per layer means the rewrite has something to match;
+decomposed matmul+softmax attention means it does not. E4B's *vision* tower
+has 32 SDPA ops and is fine — only its language model is affected.
+
+**This is an export defect, not a model property.** Re-exporting the same
+`google/gemma-4-E4B-it` weights to the same INT8 precision with a current
+stack (optimum-intel 2.2.0.dev0, transformers 5.5.4, OpenVINO 2026.3) yields
+**42 SDPA ops and a working CB backend** — same 7.8 GB, same 42-layer /
+84 KB-per-token geometry, only the attention differs.
+
+What we did *not* establish is which component caused Intel's build to
+decompose. The transformers version recorded in the IRs (5.5.4 on the two
+that work, 5.5.0 on the one that doesn't) is correlation, not cause:
+`Gemma4ForConditionalGeneration._supports_sdpa` is `True` on both. The
+likelier mechanism is the export **environment**, because optimum-intel only
+pins the attention implementation for models listed in
+`FORCE_ATTN_MODEL_CLASSES` (`phi3_v`, `gemma2`, `llama4`) and **`gemma4` is
+not among them** — so whatever the environment resolves to is what gets
+traced.
 
 So a model can lose prefix caching for reasons invisible in its name, size
 or precision. Check the load log rather than assuming; `/health`'s per-slot

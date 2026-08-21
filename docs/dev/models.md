@@ -59,6 +59,32 @@ GB of Windows pagefile (on 128 GB RAM) succeeded**, 200 GB did not (#19,
 Dmitriy Teteruk). Weight format is irrelevant to this stage — the blowup
 happens before quantization.
 
+## Two traps when re-exporting a model yourself (2026-08-21)
+
+Both found while re-exporting `google/gemma-4-E4B-it` to check an Intel IR.
+
+1. **Attention must come out fused, or you silently lose prefix caching.**
+   The CB backend is built by rewriting `ScaledDotProductAttention` nodes, so
+   an export that traced decomposed matmul+softmax attention cannot use it.
+   optimum-intel only pins the attention implementation for models listed in
+   `FORCE_ATTN_MODEL_CLASSES`; everything else takes whatever the export
+   environment resolves to. Check the result, don't assume:
+
+   ```bash
+   grep -c 'ScaledDotProductAttention' openvino_language_model.xml  # want one per layer
+   ```
+
+2. **The chat template is baked into `openvino_tokenizer.xml` at export
+   time.** Editing `chat_template.jinja` in a finished export changes
+   nothing. And a template that works in Python Jinja2 may not parse in
+   openvino_genai's C++ Jinja — Google's Gemma 4 template uses implicit
+   string concatenation inside `raise_exception(...)`, which fails with
+   "Expected closing parenthesis in call args" at warmup. Patch the template
+   in the *source* directory before exporting.
+
+Failure mode 1 is invisible until you read the load log; failure mode 2
+loads and caches fine and then dies at warmup. See `prefix-cache.md`.
+
 ## NPU export rule (2026-08-06)
 
 Models converted for the NPU **must be channel-wise**

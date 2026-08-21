@@ -66,14 +66,36 @@ cannot perform the SDPAToPagedAttention transformation.
 ```
 
 NoLlama degrades correctly (warning at load, `kv_pool_gb` null in
-`/health`, prewarm skips the slot) -- it simply cannot cache. And the cause
-is the **exporter**, not the model: E2B and 26B-A4B were exported with
-transformers 5.5.4 and both build the CB backend; E4B used 5.5.0 and cannot.
-Nothing in the model's name, size or precision hints at it.
+`/health`, prewarm skips the slot) -- it simply cannot cache.
 
-Re-evaluate if: Intel re-exports E4B with a newer stack, or a later runtime
-learns to insert the transformation. Verify by grepping the load log, not by
-assuming -- and see `docs/dev/prefix-cache.md`.
+**It is an export defect, and we proved it by re-exporting.** The same
+`google/gemma-4-E4B-it` weights, same INT8 precision, current stack
+(optimum-intel 2.2.0.dev0, transformers 5.5.4, OpenVINO 2026.3) produce 42
+fused SDPA ops -- one per layer -- and prefix caching engages. Identical
+7.8 GB, identical 42-layer / 84 KB-per-token geometry; only the attention
+differs. Nothing in the published model's name, size or precision hints at
+which one you have.
+
+Correction to an earlier reading of this: the transformers version in the
+IRs (5.5.4 on the two that work, 5.5.0 on E4B) is **correlation, not
+cause** -- `_supports_sdpa` is True on both. optimum-intel pins the
+attention implementation only for models in `FORCE_ATTN_MODEL_CLASSES`
+(`phi3_v`, `gemma2`, `llama4`), and `gemma4` is absent, so the export
+environment decides. That is how two builds of one model diverge.
+
+Second trap for anyone re-exporting it themselves: the chat template is
+baked into `openvino_tokenizer.xml` rt_info **at export time**, so replacing
+`chat_template.jinja` afterwards does nothing. Google's raw template uses
+Python-style implicit string concatenation inside `raise_exception(...)`,
+which openvino_genai's C++ Jinja parser rejects ("Expected closing
+parenthesis in call args"). Intel post-processes that away -- their template
+is 16,317 bytes against Google's 18,569, with zero `raise_exception`. A DIY
+export needs the patched template in the source directory *before* running
+the exporter, or it loads and caches but dies at warmup.
+
+Re-evaluate if: Intel re-exports E4B, or `gemma4` lands in
+`FORCE_ATTN_MODEL_CLASSES`. Verify by grepping the IR, not by assuming --
+see `docs/dev/prefix-cache.md`.
 
 ## Untracking the model-watch state file (2026-08-18 -> reverted 2026-08-21)
 
