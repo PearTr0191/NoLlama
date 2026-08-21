@@ -1,0 +1,103 @@
+# Model plumbing: naming, integrity, `--scan`, export
+
+Read this before touching model discovery, display names, `--scan`,
+weight-integrity checks, or `download-model.ps1`.
+
+## Naming — the directory name is authoritative
+
+The directory name is the web-UI label **and** the model ID clients
+request. `resolve_display_name` uses the name as given and only follows a
+symlink/junction when that name is generic (`model/`, `gpu-model/` — what
+`install.ps1` links). It previously called `realpath` unconditionally,
+which silently discarded a deliberate rename (#19).
+
+There is deliberately **no `--model-name` flag** — see `TODONT.md` for why
+the rename *is* the interface.
+
+## Weight integrity
+
+`install.ps1` validates local/cached models before offering or linking
+them: the `.bin`+`.xml` pair must exist and the `.bin` must not be
+truncated (#17). The IR `.xml` records each weight blob's offset+size, so
+**max(offset+size) is the exact minimum `.bin` size**. The IR has no
+checksum; truncation is the realistic failure, corruption-in-place is out
+of scope.
+
+`nollama.py` re-checks the same invariant at load
+(`_verify_weights_integrity`) since models can arrive without
+`install.ps1`. A truncated/missing model fails with a plain-English error,
+and the "Is another process using the NPU?" hint is suppressed for that
+class of failure.
+
+## `--scan`
+
+Reports what each model directory actually holds: display name (and where
+it came from), LLM/VLM/Whisper, architecture, MoE shape, geometry,
+integrity, and the **real weight precision read from the IR's model-level
+`<rt_info>`** (`nncf/weight_compression/mode` + `group_size` + `ratio` +
+`awq`) rather than from the folder name, which can lie. `--scan` also shows
+a `Backend` line.
+
+`read_ir_rt_info` seeks the **tail** of the `.xml`: the graph is tens of MB
+on a large model, and the model-level block is the last `<rt_info>`, after
+`<edges>`.
+
+No server, no device init, no model load.
+
+## `download-model.ps1`
+
+Fetch/convert any HF model. **PowerShell-style flags** (`-Convert -Weight
+int4 -Trust`), NOT GNU `--convert` — #19: the docs once showed `--` syntax
+and users copy-pasted it, so a catch-all param now prints the corrected
+command when someone tries.
+
+**Conversion is RAM-bound, not disk-bound.** optimum-intel's Qwen3-Next
+patcher builds an fp32 copy of every expert weight (workaround for OpenVINO
+CVS-181449) — for Qwen3-Coder-Next that's `512 experts × 2048 × 512 × 4 B`
+= 2 GB per projection stack, ~288 GB across 48 layers × 3. Measured: **400
+GB of Windows pagefile (on 128 GB RAM) succeeded**, 200 GB did not (#19,
+Dmitriy Teteruk). Weight format is irrelevant to this stage — the blowup
+happens before quantization.
+
+## NPU export rule (2026-08-06)
+
+Models converted for the NPU **must be channel-wise**
+(`download-model.ps1 -Weight int4-cw` or `int8-cw`): default
+group-quantized int4 IRs crash the NPU driver compiler ("Found N
+duplicated names", known vpux bug).
+
+`int8-cw` halves decode against `int4-cw` but keeps more quality — except
+on the LFM2 family, where no good int8 NPU variant exists (see
+`TODONT.md`).
+
+## Verified models
+
+- Qwen3-8B (INT4-CW) on NPU — recommended, needs MAX_PROMPT_LEN=4096
+- SmolLM3-3B (INT4-CW 23 tok/s, INT8-CW 12 tok/s) on 285K NPU — 2026.3,
+  our export
+- LFM2-1.2B / LFM2.5-1.2B-Instruct (INT4-CW, ~37-39 tok/s) on 285K NPU —
+  NPU-only builds, old-stack exports fail CPU/GPU (see `TODONT.md`)
+- MiniCPM5-1B (INT4) on GPU/CPU — 2026.3, no NPU support upstream
+- Phi 3.5 Mini (INT4-CW) on NPU — smaller, faster
+- DeepSeek-R1-1.5B (INT4-CW) on NPU — works but terrible quality (testing
+  only)
+- Gemma 3 4B Vision (INT4) on GPU — fast VLM
+- Qwen2.5-VL-3B/7B (INT4/INT8) on GPU — proven for image tasks
+- Qwen3-30B-A3B on GPU — needs >16 GB VRAM, falls back to CPU silently on
+  16 GB cards
+- Muse-Glimmer-30B (Intel's `OpenVINO/Muse-Glimmer-30B-int4-ov`) on GPU —
+  VLM slot on the GenAI path, needs the **nightly** runtime until 2026.4
+  releases. Arc Pro B60 ~14 tok/s raw / 18.5 through the serving path; Arc
+  B390 iGPU (Xe3, Linux, community report, issue #29, 2026-08-21) 4.5
+  tok/s. The optimum-path GPU corruption (openvino#37419) never applied
+  here. `_AtemPlainFilter` translates Glimmer's surviving ATEM channel
+  markers into `<think>` blocks on both `generate_vlm` and `stream_vlm`.
+  Full story in `docs/MODELS.md`.
+
+Not yet tested here: Qwen3-VL, pre-exported by Intel as
+`OpenVINO/Qwen3-VL-8B-Instruct-int4-ov` (May 2026).
+
+## Prompting small models
+
+VLM prompts must be dead simple for small models (3B): one question, one
+answer, minimal JSON. **All logic in Python, not in the prompt.**
