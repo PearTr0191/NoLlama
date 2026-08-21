@@ -5,46 +5,6 @@ the docs — this file is only what's still open.
 
 ## Open
 
-- **Waiting on mikestahili's Xe3/B390 iGPU Glimmer run.** Asked 2026-08-18
-  (issue #29, with the exact recipe: `git pull`, `install.ps1 -Nightly`,
-  Intel's export, `venv-nightly` NOT `venv-optimum`, `--device GPU`). The
-  Glimmer→GenAI reroute shipped AND was verified end-to-end through
-  NoLlama's serving path on the B60 (2026-08-18, nightly runtime, Intel's
-  export): loads as a plain VLM on GPU, greedy answers correct, `<think>`
-  framed on both the non-streaming and streaming OpenAI surfaces, no
-  channel-routing leak, 18.5 tok/s decode (vs 8–11 on optimum). Every
-  previous Glimmer GPU result came from the optimum path, where all four
-  Intel GPU classes corrupted — Glimmer-on-GenAI on an *integrated* GPU is
-  the datapoint worth having.
-
-  How the reroute works — by not existing: `muse_glimmer` is simply **out of
-  `NEEDS_OPTIMUM`** (only `nemotron_h` remains). Every Glimmer export in
-  existence (Intel's and ours) is VLM-shaped, so Glimmer is served as a
-  plain VLM, no special routing at all. The one Glimmer-specific piece is
-  `_AtemPlainFilter`: it translates the channel routing that survives
-  detokenisation (`to=self` glued onto reasoning, `assistant to=user` glued
-  onto the answer) into `<think>` blocks on both `generate_vlm` and
-  `stream_vlm`. That part is irreducible app-side work — the model emits
-  channels as text and the pipeline strips the markers; vLLM/TGI would have
-  to do the same. Unit-tested against every chunk split, plus the live run
-  above.
-
-  Corrections to what this file used to claim: our own export
-  (`aweussom/Muse-Glimmer-30B-int4-ov`) is **VLM-shaped too**
-  (`openvino_vision_embeddings_model.xml` is right there), so the earlier
-  "is_vlm overrides the blocklist, keeping our LLM-shaped export on optimum"
-  plan protected nothing — dropping the set entry is equivalent and simpler.
-  On a release runtime, where VLMPipeline lacks the arch, Glimmer now
-  **fails at load** instead of limping along on optimum — docs say so, and
-  `--backend optimum` (from `venv-optimum/`) is the escape hatch. MODELS.md's
-  example command gained that flag.
-
-  Still needs the nightly runtime — Intel exported it with a
-  `2026.4.0-...-muse_onyx` build and the card wants 2026.3.1+ with a genai
-  pre-release. So Glimmer's stack gate becomes **"2026.4 ships stable"**,
-  the same gate Qwen3.8 is already waiting on. VLM slots get no prefix
-  cache (the CB backend is LLM-only), so that win does not arrive with this.
-
 - **VLM slots are agent-grade (merged as PR #30 + the prewarm commit).**
   Three changes, all verified end-to-end 2026-08-18:
 

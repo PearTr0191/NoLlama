@@ -238,6 +238,17 @@ corruption story below **never applied to the GenAI path**. Glimmer's ATEM
 reasoning channels are translated to `<think>` blocks on this path too
 (plain-text translation — the pipeline strips the channel markers).
 
+Confirmed on an **integrated** GPU as well — the datapoint that was
+missing, since every corrupted Glimmer result had come from the optimum
+path. Arc B390 iGPU (Core Ultra X7 358H, Fedora, nightly runtime
+`2026.4.0-22828`, Intel's export, community report in issue #29,
+2026-08-21): loads as a VLM slot, answers correctly, reasoning framed in a
+`<think>` block with no channel-marker leak, **4.5 tok/s** decode (66
+tokens in 14.6 s). Same box, same model, optimum path on 2026.3 garbled —
+so the split is the *backend*, not the GPU generation. Budget roughly a
+quarter of discrete-Battlemage decode on an iGPU: chat-grade, not
+agent-loop-grade.
+
 What to know before switching:
 
 - Needs the **nightly runtime** (`install.ps1 -Nightly`) until OpenVINO
@@ -301,7 +312,10 @@ you from:
   report in issue #24, 2026-08-13): identical corruption fingerprint —
   same "the user message is garbled" half-perception, same think-loop
   hang under greedy. Three iGPU generations and two OSes rule out any
-  Windows-driver or Xe2-specific theory.
+  Windows-driver or Xe2-specific theory. (Runtime confirmed after the fact
+  as `2026.3.0-22451` — a release, not the 2026.4 nightly, so it is *this*
+  bug and not a hole in Intel's fix. The same device runs Glimmer correctly
+  on the GenAI path — see above.)
 - **Discrete Battlemage** (Arc Pro B60 24 GB, Windows, verified
   2026-08-15): **same corruption.** Dedicated VRAM does not save it, which
   kills the shared-memory theory the iGPU-only evidence had suggested.
