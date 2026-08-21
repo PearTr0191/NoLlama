@@ -60,10 +60,10 @@
         },
         {
             "name": "Gemma 4 E4B (INT8)",
-            "hf_id": "OpenVINO/gemma-4-E4B-it-int8-ov",
+            "hf_id": "aweussom/gemma-4-E4B-it-int8-ov",
             "source": "pre-exported",
             "est_size_gb": 8,
-            "notes": "Runs on every device class except NPU: 16.4 tok/s on Arc 140V, ~13 on CPU. Reads fine detail its E2B sibling cannot. CAVEAT (measured 2026-08-21, 2026.3 release): this IR gets NO PREFIX CACHING — it has no SDPA op, so the caching backend cannot be built and every turn re-prefills the whole prompt. Fine for one-shot vision, poor for agents; use E2B or 26B-A4B there. See docs/dev/prefix-cache.md."
+            "notes": "Runs on every device class except NPU: 16.4 tok/s on Arc 140V, ~13 on CPU. Reads fine detail its E2B sibling cannot. This is OUR re-export (2026-08-21) — Intel's OpenVINO/gemma-4-E4B-it-int8-ov traced attention decomposed, so it can get NO prefix caching at all; ours has the fused SDPA op, so caching works (~2.6x faster per turn on a repeated agent prompt) with byte-identical answers. Reported upstream. Intel's build is ~2.2x faster on a cold turn, so prefer theirs for one-shot vision."
         },
         {
             "name": "Qwen3.5 4B (INT4)",

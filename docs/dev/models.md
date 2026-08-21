@@ -121,8 +121,12 @@ on the LFM2 family, where no good int8 NPU variant exists (see
     the cross-stack note below.
   - `E4B-it-int8-ov` (7.8 GB, 42 layers, 84 KB/token KV) — reads what E2B
     cannot, but **gets no prefix caching on this runtime** (its IR has no
-    SDPA op; see `prefix-cache.md`). Poor agent-serving pick for that reason
-    alone.
+    SDPA op; see `prefix-cache.md`). Use
+    [`aweussom/gemma-4-E4B-it-int8-ov`](https://huggingface.co/aweussom/gemma-4-E4B-it-int8-ov)
+    instead for agent work — our re-export of the same weights, fused
+    attention, prefix caching working, byte-identical answers. Intel's is
+    still the better pick for one-shot vision, being ~2.2x faster on a cold
+    turn.
   - `26b-a4b-it-int4-ov` (14.3 GB, INT4-AWQ, MoE 128 experts, 30 layers,
     262k context) — the best of the three and prefix caching works, but its
     KV is **240 KB/token**, so the auto-sizer hits its 2 GB floor and buys
