@@ -93,6 +93,25 @@ is 16,317 bytes against Google's 18,569, with zero `raise_exception`. A DIY
 export needs the patched template in the source directory *before* running
 the exporter, or it loads and caches but dies at warmup.
 
+**What the defect actually costs**, measured on the B60 with a ~7.9k-token
+repeated prefix (the shape of an agent's fixed system prompt), 2026-08-21:
+
+| | turn 1 | turn 2 | turn 3 |
+|---|---|---|---|
+| Intel's IR (no cache possible) | 2.63s | 3.06s | 3.03s |
+| our re-export (prefix cache) | 5.92s | **1.16s** | **1.16s** |
+
+Note the honest shape: Intel's IR is *faster cold*, because the CB path
+prefills more slowly (the same trade recorded for Glimmer). Ours pays a
++3.3s premium once and then runs **2.6x faster per turn**, breaking even
+cumulatively by turn 3 -- and with prewarm the cold turn is paid before the
+port answers, so every user-visible turn is the fast one. So this is "wrong
+model for agent loops", not "catastrophically broken".
+
+Quality is unaffected either way: our re-export answered **7/7 probe cases
+byte-identically** to Intel's, including both of its wrong answers (16 for
+17 dots, 8 for 7). The re-export adds a capability; it changes nothing else.
+
 Re-evaluate if: Intel re-exports E4B, or `gemma4` lands in
 `FORCE_ATTN_MODEL_CLASSES`. Verify by grepping the IR, not by assuming --
 see `docs/dev/prefix-cache.md`.
