@@ -105,6 +105,12 @@ the docs — this file is only what's still open.
   download (`install-optimum.ps1` is no longer the recommended Glimmer
   path, only the `--backend optimum` fallback). Docs may say we know it
   will work; the installer may not act on it.
+
+  **Qwen3.8 27B rides the same gate** (removed from `models.json`
+  2026-08-21). It had a menu entry carrying `requires_nightly: true`, which
+  contradicted this very rule; the rule wins. Re-add
+  `OpenVINO/Qwen3.8-27B-int4-ov` when 2026.4 ships as a release — and test
+  it first, since it was never run here.
 - **`transformers` main breaks the optimum backend's text-only path.**
   `5.16.0.dev0` calls `get_experts_implementation()` from
   `_optimize_model_for_decode()`; `OVModelForCausalLM` doesn't implement it, so
