@@ -3,6 +3,78 @@
 Things we tried that didn't work, or that work but aren't worth doing. Each
 entry explains *why not* so we don't re-litigate it in six months.
 
+## A Gemma-family guard to honour upstream's `requires_sdpa()` (2026-08-21)
+
+Idea: openvino_genai's `requires_sdpa()` forces the plain SDPA backend by
+default for GEMMA3 + GEMMA4_UNIFIED on `releases/2026/3` (Intel tickets
+171180 / 189844) because PagedAttention could not represent Gemma's
+non-diagonal attention masks. Passing `scheduler_config` takes the
+`explicitly_requires_paged_attention` branch and walks straight past that
+guard -- which is exactly what NoLlama's default-on prefix caching does. The
+proposed fix was a version-gated special case: skip the CB backend for those
+architectures when the runtime is older than 2026.4.
+
+**Verdict:** not needed. Measured, don't add it.
+
+**Why not:** A/B'd CB (PagedAttention) against `--no-prompt-cache` (plain
+SDPA) on the Arc Pro B60, 2026.3 release, greedy, identical inputs:
+
+- `gemma-4-26b-a4b-it-int4-ov` -- **7/7 answers byte-identical**, including
+  an exact three-line OCR transcription and the same wrong dot count. CB
+  genuinely engaged (`prefix caching on`, `kv_pool_gb: 2`). This is the
+  load-bearing result: biggest model, real PagedAttention.
+- `gemma-4-E2B-it-int4-ov` -- 5/7 identical. The two divergences were
+  second-pass punctuation (`Red green blue` / `Red, green, blue`) and one
+  grid-reading case where SDPA answered correctly and CB denied the image.
+  Across the repeat runs that is **1 success in 24 attempts**, on the one
+  task sitting exactly at that model's capability ceiling. Noise, but it is
+  the single datapoint a skeptic would cite, so it is recorded rather than
+  rounded away.
+- `gemma-4-E4B-it-int8-ov` -- inapplicable: its IR cannot build the CB
+  backend at all (below), so both runs were the same plain pipeline and the
+  match is tautological.
+
+Corroborating: the same prompts through Ollama/llama.cpp on an RTX 5090
+produced byte-identical OCR and the same per-size counting bias, i.e. the
+stacks feed the model equivalent visual information. Nothing in the
+measurements looks like corrupted attention.
+
+Also note the guard is gone on master (`requires_sdpa()` is a stub returning
+false), so upstream considers this fixed for 2026.4 -- a special case would
+have been dead on arrival there anyway.
+
+Re-evaluate if: a Gemma vision model shows *systematic* divergence between
+the CB and plain paths on the same inputs -- multi-image, long-context, or
+the audio path, none of which were exercised here.
+
+## Gemma 4 E4B for agent serving on OpenVINO 2026.3 (2026-08-21)
+
+Idea: `OpenVINO/gemma-4-E4B-it-int8-ov` is the sweet spot on paper -- reads
+detail E2B cannot, a third of the 26B's footprint, and Intel publishes it
+ready to run.
+
+**Verdict:** not for agent workloads on this runtime. It gets **no prefix
+caching**, so every turn re-prefills the whole system prompt.
+
+**Why not:** the CB backend is built by rewriting the graph, and this IR has
+nothing to rewrite:
+
+```
+No ScaledDotProductAttention operation observed in the graph,
+cannot perform the SDPAToPagedAttention transformation.
+); using plain pipeline
+```
+
+NoLlama degrades correctly (warning at load, `kv_pool_gb` null in
+`/health`, prewarm skips the slot) -- it simply cannot cache. And the cause
+is the **exporter**, not the model: E2B and 26B-A4B were exported with
+transformers 5.5.4 and both build the CB backend; E4B used 5.5.0 and cannot.
+Nothing in the model's name, size or precision hints at it.
+
+Re-evaluate if: Intel re-exports E4B with a newer stack, or a later runtime
+learns to insert the transformation. Verify by grepping the load log, not by
+assuming -- and see `docs/dev/prefix-cache.md`.
+
 ## Untracking the model-watch state file (2026-08-18 -> reverted 2026-08-21)
 
 Idea: `scripts/seen_models.json` is `model_watch.py`'s state. It churned on

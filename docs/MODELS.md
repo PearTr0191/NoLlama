@@ -201,6 +201,34 @@ verified yet — be honest about what's measured vs. assumed.
 | Phi 4 (INT4) | ~8 GB | Strong reasoning. |
 | Phi 4 Reasoning (INT4) | ~8 GB | Chain-of-thought. |
 
+### Gemma 4 on OpenVINO: measured 2026-08-21
+
+Intel publishes three Gemma 4 exports. All are `image-text-to-text`, so they
+all load as **VLM slots** (tool calling and prefix caching apply). Tested on
+an Arc Pro B60 with the 2026.3 release:
+
+| Model | Size | Notes |
+|---|---|---|
+| `gemma-4-E2B-it-int4-ov` | ~4 GB | Works, prefix caching works. Weakest: misreads small text and, when it cannot resolve an image, replies *"the image is missing"* instead of saying so. Nothing is wrong with your setup. |
+| `gemma-4-E4B-it-int8-ov` | ~8 GB | Reads detail E2B cannot, but **gets no prefix caching** on this runtime — its IR has no SDPA op, so the caching backend cannot be built. Fine for one-shot vision, poor for agents. |
+| `gemma-4-26b-a4b-it-int4-ov` | ~15 GB | Best of the three; prefix caching works. Its KV is **240 KB/token**, so the auto-sized pool lands on its 2 GB floor and holds only ~8k tokens — **pin `--cache-size-gb`** before running an agent against it. NoLlama warns at load. Loads in ~40s. |
+
+Two things that apply to every VLM this size, not just Gemma:
+
+- **They cannot count objects.** Shown 17 dots, six different
+  model/stack/quantization combinations answered 15, 15, 16, 18, 20 and 20 —
+  including a 25.8B model. Verified against Ollama/llama.cpp on an RTX 5090
+  as well, so it is the model class, not OpenVINO.
+- **A model claiming it received no image is usually just failing the task.**
+  Same weights on llama.cpp answer confidently but wrongly where the OpenVINO
+  build says "the image is missing". Check with a simpler question on the same
+  image before suspecting your plumbing.
+
+Loading a 15 GB model stages through host RAM, so **peak system memory during
+load is roughly model-sized** even on a discrete card. Two such loads at once
+on a 32 GB box will thrash the pagefile for tens of minutes; start one server
+at a time.
+
 ## A note about small models
 
 During initial NPU testing with DeepSeek R1 1.5B, we asked:

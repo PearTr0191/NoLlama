@@ -28,6 +28,29 @@ NPU slots keep the plain pipeline (no CB path; NPU keeps MAX_PROMPT_LEN).
 Any device or runtime that can't build the CB backend falls back to the
 plain pipeline with a warning.
 
+**It is not only devices and runtimes — an individual IR can refuse.** The
+CB path is built by rewriting the graph (`SDPAToPagedAttention`), so a model
+exported without an SDPA op cannot take it at all:
+
+```
+No ScaledDotProductAttention operation observed in the graph,
+cannot perform the SDPAToPagedAttention transformation.
+); using plain pipeline
+```
+
+Measured 2026-08-21 on the B60 / 2026.3 release across Intel's three Gemma 4
+exports — and it tracks the **exporter**, not the model size:
+
+| IR | exported with | CB backend |
+|---|---|---|
+| `gemma-4-E2B-it-int4-ov` | transformers 5.5.4 | builds |
+| `gemma-4-26b-a4b-it-int4-ov` | transformers 5.5.4 | builds |
+| `gemma-4-E4B-it-int8-ov` | transformers **5.5.0** | **refuses** |
+
+So a model can lose prefix caching for reasons invisible in its name, size
+or precision. Check the load log rather than assuming; `/health`'s per-slot
+`kv_pool_gb` is the other tell (null = fell back).
+
 Cold-prefill trade-off, measured on the B60 with a 33k prompt: ~8.7s on the
 plain pipeline vs 53.7s under CB (then 1.4s per repeat). **Agents win from
 turn two; one-shot prompts pay more once.**
@@ -63,7 +86,8 @@ paths) — so the workflow is: run once → restart with `--prewarm`.
   the startup prefill replays through `parse_messages`' flattening so the
   cached token prefix matches real requests. Measured, Glimmer/B60: first
   turn after restart 12.4s → 0.65s TTFT.
-- Slots whose runtime fell back to the plain pipeline zero `kv_pool_gb` at
+- Slots whose runtime fell back to the plain pipeline report a **null**
+  `kv_pool_gb` at
   load, so prewarm skips them instead of burning a 30B-scale prefill for
   nothing (this also keeps `/health` honest about a dead cache).
 

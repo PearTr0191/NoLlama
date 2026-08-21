@@ -81,7 +81,40 @@ on the LFM2 family, where no good int8 NPU variant exists (see
 - Phi 3.5 Mini (INT4-CW) on NPU — smaller, faster
 - DeepSeek-R1-1.5B (INT4-CW) on NPU — works but terrible quality (testing
   only)
-- Gemma 3 4B Vision (INT4) on GPU — fast VLM
+- Gemma 3 4B Vision (INT4) on GPU — **untested here.** The "fast VLM" claim
+  this list used to carry traced back to a drive-by line in an unrelated
+  commit with no measurement behind it, and `docs/MODELS.md` has always said
+  "Untested". Believe the latter.
+- Gemma 4 (Intel's `OpenVINO/gemma-4-*`) on GPU — measured 2026-08-21 on the
+  Arc Pro B60, 2026.3 release. All three exports are `image-text-to-text`, so
+  they land on **VLM slots** whatever `models.json` files them under:
+  - `E2B-it-int4-ov` (4.1 GB, 35 layers, 35 KB/token KV) — prefix caching
+    works. Weakest of the three: misreads a 3x3 letter grid at 360x360 and
+    answers *"the image is missing"* rather than admitting it cannot resolve
+    the glyphs. That phrasing is a **model** quirk, not a lost image — see
+    the cross-stack note below.
+  - `E4B-it-int8-ov` (7.8 GB, 42 layers, 84 KB/token KV) — reads what E2B
+    cannot, but **gets no prefix caching on this runtime** (its IR has no
+    SDPA op; see `prefix-cache.md`). Poor agent-serving pick for that reason
+    alone.
+  - `26b-a4b-it-int4-ov` (14.3 GB, INT4-AWQ, MoE 128 experts, 30 layers,
+    262k context) — the best of the three and prefix caching works, but its
+    KV is **240 KB/token**, so the auto-sizer hits its 2 GB floor and buys
+    only ~8k tokens. The preflight says so at load; **pin
+    `--cache-size-gb`** before pointing an agent at it. Loads in ~40s.
+
+Two caveats that apply to every VLM this size, both measured across two
+inference stacks (OpenVINO on the B60, Ollama/llama.cpp on an RTX 5090):
+
+- **They cannot count.** Asked how many dots were in an image of 17, six
+  model/stack/quantization combinations answered 15, 15, 16, 18, 20 and 20.
+  Not one correct, including a 25.8B model. Don't build on it.
+- **Failure style differs by stack, capability does not.** Ollama and
+  OpenVINO produced byte-identical OCR transcriptions (three lines including
+  an arbitrary serial) and the identical wrong count at matching model size —
+  but where a model is at its limit, OpenVINO's E2B says "the image is
+  missing" while llama.cpp's E2B confidently names the wrong row. **When a
+  small Gemma claims the image is missing, the image is not missing.**
 - Qwen2.5-VL-3B/7B (INT4/INT8) on GPU — proven for image tasks
 - Qwen3-30B-A3B on GPU — needs >16 GB VRAM, falls back to CPU silently on
   16 GB cards
