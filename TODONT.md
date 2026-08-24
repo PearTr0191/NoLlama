@@ -3,6 +3,41 @@
 Things we tried that didn't work, or that work but aren't worth doing. Each
 entry explains *why not* so we don't re-litigate it in six months.
 
+## The stock `openvino/ubuntu24_runtime` image as the container base (2026-08-24)
+
+Idea: Intel publishes an OpenVINO runtime image; use it as the base for a
+NoLlama container and get the GPU stack for free. It is what the Docker test
+protocol's own Phase 0 command uses.
+
+**Verdict:** unusable on Battlemage. Build the driver stack yourself.
+
+**Why not:** `openvino/ubuntu24_runtime:latest` (OpenVINO 2026.3) ships
+`intel-opencl-icd 24.48.31907.7` and `intel-level-zero-gpu 1.6.31907.7` —
+NEO 24.48, December 2024, which predates Arc Pro B60 (BMG-G31, `0xe211`).
+On the B60 box it enumerates **CPU only**. The failure is silent and reads
+exactly like "the container cannot see the GPU": `zeInit` returns
+`ZE_RESULT_ERROR_UNINITIALIZED`, `clGetPlatformIDs` returns `-1001`
+(`CL_PLATFORM_NOT_FOUND_KHR`). The driver *does* reach the card — NEO debug
+output prints `Created Wddm context. Status: :0, engine: 4` — it simply does
+not recognise the device id.
+
+Installing the current upstream release over it (compute-runtime
+26.31.39395.13 + IGC 2.40.13, both from GitHub releases) makes the GPU
+appear and compute correctly. Two dpkg wrinkles when doing that: `intel-ocloc`
+collides with the image's `intel-opencl-icd` over `libocloc.so`, and
+`libze-intel-gpu1` supersedes the older `intel-level-zero-gpu` package name —
+so remove that one first and install the rest with `--force-overwrite`.
+
+Since every Intel-supplied layer has to be replaced anyway, the eventual
+image is better built `FROM ubuntu:24.04` with the driver stack and the pip
+wheels installed directly: 1.28 GB model-free, versus fighting a base image
+whose only remaining contribution is a Python it also has to be told not to
+use. Measurements and the full result set are in `DOCKER-INSTALL.md`.
+
+Re-evaluate when Intel's runtime image ships a NEO recent enough for the
+hardware in question — the check is one `available_devices` call, and the
+answer is unambiguous.
+
 ## A Gemma-family guard to honour upstream's `requires_sdpa()` (2026-08-21)
 
 Idea: openvino_genai's `requires_sdpa()` forces the plain SDPA backend by

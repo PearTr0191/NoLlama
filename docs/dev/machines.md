@@ -15,11 +15,12 @@ Where this repo lives and where most measurements are taken.
 | NPU | **none** |
 | RAM | 32 GB |
 | OS | Windows 11 Pro 26200 |
-| WSL | installed 2026-08-24, first boot pending |
-| Docker | not installed |
+| WSL | 2.7.12.0, Ubuntu 24.04.4, kernel 6.18.33.2-2 |
+| Docker | Docker Desktop 4.87.0 / engine 29.7.2 |
 
 **The clean Intel GPU test.** No other GPU vendor in play, so an enumeration
-result here is unambiguous.
+result here is unambiguous. Also where the Docker work happens (#31) — the
+container GPU results in `DOCKER-INSTALL.md` are all from this box.
 
 Watch the RAM: 32 GB with ~19-26 GB typically free. Loading a big model
 stages through host RAM at roughly model size, so **one model server at a

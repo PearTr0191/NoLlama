@@ -295,6 +295,257 @@ on this section.
 
 ---
 
+---
+
+# RESULTS — measured 2026-08-24 on the B60 box
+
+Phases 0, 1 and 2 all ran. **Verdict: it works, with one hard limitation and
+one unexplained model-specific defect.** Two NoLlama bugs were found and
+fixed on the way; both were container-only in effect, neither is
+container-specific in cause.
+
+Environment: Windows 11 Pro 26200, WSL 2.7.12.0 (kernel 6.18.33.2-2),
+Ubuntu 24.04.4, Docker Desktop 4.87.0 / engine 29.7.2, Arc Pro B60 24 GB,
+OpenVINO + GenAI 2026.3 (identical wheel versions in and out of the
+container — verified, so nothing below is a version difference).
+
+## The one-paragraph answer
+
+An Intel GPU **is** usable from a Docker container on this box, at native
+speed: 74-79 tok/s in-container vs 76-78 native on the same model, prefix
+cache cold-vs-repeat 1.9s → 0.3s vs 2.1s → 0.2s native. Two things stand
+between that and a supported path. First, **the stock
+`openvino/ubuntu24_runtime` image cannot see the GPU at all** — its driver
+predates Battlemage; you must build your own image on the current upstream
+compute-runtime. Second, **WSL's `/dev/dxg` caps a single GPU allocation at
+1 GiB** regardless of the card's real 23.3 GB, which kills any model with a
+tensor over that size until a plugin hint is set. Neither limitation applies
+to native Linux with `/dev/dri`, which is what #31 actually asked about —
+but neither could be verified here either.
+
+## Phase 0 — GPU visible and correct: PASS, but not with the stock image
+
+The protocol's own command returns **CPU only**:
+
+```
+openvino/ubuntu24_runtime:latest  ->  [('CPU', 'AMD Ryzen 9 5950X ...')]
+```
+
+Not a container problem. That image ships `intel-opencl-icd 24.48.31907.7`
+(NEO 24.48, Dec 2024), which predates Arc Pro B60 (BMG-G31, device id
+`0xe211`). The Level Zero driver *does* reach the card — with
+`NEOReadDebugKeys=1 PrintDebugMessages=1` it prints `Created Wddm context.
+Status: :0, engine: 4` — and then enumerates nothing: `zeInit` returns
+`ZE_RESULT_ERROR_UNINITIALIZED`, `clGetPlatformIDs` returns `-1001`
+(`CL_PLATFORM_NOT_FOUND_KHR`). A device the driver does not know reads
+exactly like a device that is not there.
+
+Rebuilt on the current upstream release (compute-runtime 26.31.39395.13 +
+IGC 2.40.13, installed over the image's own packages), the same command
+gives:
+
+```
+[('CPU', 'AMD Ryzen 9 5950X 16-Core Processor'),
+ ('GPU', 'Intel(R) Graphics [0xe211] (dGPU)')]
+```
+
+Visibility is not usability, so correctness was checked too — a
+matmul+GELU compared against numpy on both devices:
+
+| | max abs error vs numpy |
+|---|---|
+| CPU | 9.155e-05 |
+| GPU (default fp16 inference) | 2.946e-02 |
+| GPU, `INFERENCE_PRECISION_HINT=f32` | 9.155e-05 — **identical to CPU** |
+
+So the fp16 delta is precision, not corruption. The GPU computes correctly.
+
+Cosmetic note: NEO 26.31 reports `Intel(R) Graphics [0xe211] (dGPU)` where
+the Windows driver reports `Intel(R) Arc(TM) Pro B60 Graphics (dGPU)`. Same
+card, no marketing name in the Linux driver's table.
+
+## THE BLOCKER — WSL /dev/dxg caps a single allocation at 1 GiB
+
+Loading `gemma-4-E2B-it-int4-ov` in the container failed outright:
+
+```
+Exceeded max size of memory object allocation: requested 2348810240 bytes,
+but max alloc size supported by device is 1073741824 bytes.
+```
+
+That 2.2 GB request is the model's
+`openvino_text_embeddings_per_layer_model.bin`. The cap is exactly 1 GiB,
+and it is a property of the /dev/dxg path, not of the card — the same B60,
+same OpenVINO build, queried both ways:
+
+| | `GPU_DEVICE_TOTAL_MEM_SIZE` | `GPU_DEVICE_MAX_ALLOC_MEM_SIZE` |
+|---|---|---|
+| native Windows | 25,055,051,776 | **25,055,051,776** |
+| container over WSL `/dev/dxg` | 25,055,051,776 | **1,073,741,824** |
+
+The driver names its own workaround in the error text, and it works:
+compiling that same sub-model with `GPU_ENABLE_LARGE_ALLOCATIONS=True`
+succeeds in 17.0s where the default config fails in 0.1s.
+
+**Fixed in `nollama.py`** (`_gpu_large_alloc_props`): a GPU slot that
+reports a max-allocation smaller than its own total budget gets the hint,
+and says so at load. Gated on the reported numbers rather than on "am I in a
+container", because the cap belongs to how the device was reached. Native
+installs are unaffected — verified: the same code loads the 26B natively
+without printing the line.
+
+After the fix E2B loads and answers correctly in the container.
+
+## Phase 1 — the NoLlama-specific hazards
+
+| | Hazard | Result |
+|---|---|---|
+| 1.1 | model naming over a bind mount | **PASS** — `--scan` and `/v1/models` both report `SmolLM3-3B-int4-cw`, from the directory name. Integrity check passes over drvfs. Compose must bind under the real name; that is a compose-file rule, not a code change |
+| 1.2 | KV pool under a container memory limit | **FAIL, now fixed** — see below |
+| 1.3 | big model stages through host RAM | **PASS** — `gemma-4-26b-a4b-it-int4-ov` (15 GB) loads clean in 133s with `.wslconfig memory=24GB`; host RAM settles back to ~2 GB once the weights are on the card. It then answers incorrectly, which is a different problem — see the defect below |
+| 1.4 | integrity check / load over drvfs | **PASS, and the worry was misplaced** — see below |
+| 1.5 | both API ports | **PASS** — `/v1/models` on 8000 and `/api/tags` on 11434, both from the host |
+| 1.6 | streaming and the SSE heartbeat | **PASS** — 61 chunks over 0.81s, first at 0.143s. Nothing buffers |
+| 1.7 | writable state / prewarm | **PASS, with a caveat** — see below |
+
+### 1.2 — confirmed as a real bug, fixed
+
+`_system_ram_bytes` read `/proc/meminfo`, which reports the **host** total
+inside a container. Measured in a `--memory=4g` container: `MemTotal` 23.5 GB,
+`/sys/fs/cgroup/memory.max` 4 GB, and NoLlama sized **a 4 GB KV pool** on top
+of 1.6 GB of weights, with no warning. Exactly the shape of issue #21's
+`Got unfinished GenerationStatus`.
+
+Fixed (`_cgroup_mem_limit_bytes`, cgroup v2 and v1, `min()` with physical
+RAM). Re-measured, same model:
+
+| container limit | KV pool before | KV pool after |
+|---|---|---|
+| `--memory=4g` | 4 GB | **2 GB** + the "agent prompts will exhaust it" warning |
+| `--memory=8g` | 4 GB | **2 GB** |
+| `--memory=24g` | 4 GB | 4 GB |
+| no limit (host 23 GB) | 4 GB | 4 GB |
+
+### 1.4 — drvfs is 35x slower to read and it does not matter
+
+Raw sequential read of the same 1.6 GB `.bin`, warm both ways:
+
+| | throughput |
+|---|---|
+| bind mount from `/mnt/c` (drvfs) | **178 MB/s** |
+| docker volume on the WSL2 ext4 filesystem | **6.4-13.7 GB/s** |
+
+And yet load time is indistinguishable — 6.13s / 6.21s from drvfs vs 6.30s /
+7.08s from the volume, GPU, two runs each. OpenVINO maps the weights rather
+than streaming them, and kernel compilation dominates. **Do not copy models
+onto ext4 to make loading faster; it does not.** (Bulk *copying* over drvfs
+is slow — 48.5s for 1.6 GB — which is the operation that gives drvfs its
+reputation.)
+
+### 1.7 — works, but the state lives in the container's writable layer
+
+`--idle-timeout 0` auto-enables prewarm, a >4000-char system prompt is
+captured to `/app/prewarm-8000.json`, and after `docker restart` the log
+shows `pre-warmed prompt cache from prewarm-8000.json (0.3s)` with
+`/health` reporting `"prewarmed": true`. Working as designed.
+
+Two things a compose file must get right, neither a code bug:
+
+- `docker run --rm` throws the file away with the container. Mount a
+  writable volume, or point `--prewarm` at one.
+- `--read-only` does **not** fail at startup, as this protocol guessed. It
+  starts fine and then silently never persists — `_maybe_capture_prewarm`
+  ends in `except OSError: pass`, so every restart is cold with nothing in
+  the log to say why. Worth a log line; not fixed here.
+
+## Phase 2 — parity: the container costs nothing measurable
+
+Same box, same models, same prompts, container vs native.
+
+| Measure | Native | Container |
+|---|---|---|
+| SmolLM3-3B steady-state | 75.7 / 77.8 / 77.1 tok/s | 74.2 / 70.3 / 78.8 tok/s |
+| SmolLM3-3B TTFT (short prompt) | 76 / 54 / 37 ms | 71 / 53 / 32 ms |
+| E2B prefix cache, ~4k-token prompt, cold → repeat | 2.1s → 0.2s | 1.9s → 0.3s |
+| SmolLM3-3B load → ready | 4.4 / 6.6 s | 6.1 / 6.2 s |
+| E2B load → ready | 11.5 / 11.5 s | 33 / 42.5 s |
+
+Throughput and prefix caching are free. **Load time is not, for models that
+need the large-allocation hint**: SmolLM3 (no tensor over 1 GiB) loads at
+native speed, E2B (2.2 GB tensor, hint active) takes ~3x longer. Plausibly
+the hint falls back to a slower allocation strategy; not investigated
+further.
+
+## The unexplained defect — gemma-4-26b-a4b is garbage on this path
+
+`gemma-4-26b-a4b-it-int4-ov` loads cleanly in the container and then emits
+deterministic gibberish (`- @__-...ls--...1-_--s-_-.lyje- de ...`),
+byte-identical across runs and across pipelines. Everything else was held
+constant and varied one axis at a time:
+
+| | result |
+|---|---|
+| native Windows, GPU, same NoLlama, same OpenVINO build | **correct** — "The capital of Norway is Oslo, and 17 + 25 equals 42." |
+| container, **CPU** | **correct** — same sentence |
+| container, GPU, prefix cache on | garbage |
+| container, GPU, `--no-prompt-cache` (plain pipeline) | garbage, *identical bytes* |
+| container, GPU, with the large-allocation hint | garbage, identical bytes |
+
+So it is not the container, not NoLlama, not the CB backend, not the
+allocation cap, and not the model. It is the container **GPU** path.
+
+It is also not "big models" or "MoE models" — those were checked:
+
+| model in the container, on GPU | size | result |
+|---|---|---|
+| `SmolLM3-3B-int4-cw-ov` (dense) | 1.6 GB | correct |
+| `gemma-4-E2B-it-int4-ov` (dense VLM) | 4.1 GB | correct |
+| `gemma-4-E4B-it-int8-ours` (dense VLM) | 7.8 GB | correct |
+| `Qwen3-30B-A3B-int4-ov` (**MoE**) | 16 GB | **correct** |
+| `gemma-4-26b-a4b-it-int4-ov` (MoE) | 15 GB | **garbage** |
+
+One model, one path. Determinism says compute defect, not memory
+corruption — which makes it a clean upstream report against NEO 26.31 on
+the WSL /dev/dxg path. Not filed yet.
+
+This is why Phase 0's "enumeration is not correctness" rule earns its place:
+every check short of reading the output says this model is fine.
+
+## What is still not answered
+
+- **Native Linux with `/dev/dri`** — untested, and it is what #31 asks for.
+  Both limitations found here (the 1 GiB cap, the stock image's driver age)
+  are artefacts of the WSL path or of one vendor image; neither predicts the
+  native answer. No claim either way.
+- **Track B / B2** — the WSL Containers preview and NPU. Unchanged: B1 says
+  no NPU in stock WSL 2, B2 is still unrun (that box is on WSL 2.6.3.0).
+- The 26B defect's cause.
+- Whether the large-allocation hint is what costs E2B its 3x load time.
+
+## Artefacts
+
+Both images were built in a session scratchpad and are **not in the repo
+yet** — that is Phase 3's job:
+
+- an `openvino/ubuntu24_runtime` derivative with the current NEO, used for
+  Phase 0 only
+- `nollama:test` — Ubuntu 24.04, current NEO, runtime deps only (no
+  `optimum`/`transformers`: the container never exports), `nollama.py` +
+  `templates/` + `static/`, model-free, **1.28 GB**
+
+Run shape that worked, for whoever writes the compose file:
+
+```bash
+docker run --device /dev/dxg -v /usr/lib/wsl:/usr/lib/wsl \
+  -e LD_LIBRARY_PATH=/usr/lib/wsl/lib \
+  -v /c/Users/you/models/<real-dir-name>:/models/<real-dir-name>:ro \
+  -p 8000:8000 -p 11434:11434 \
+  nollama:test --model-dir /models/<real-dir-name> --device GPU
+```
+
+`LD_LIBRARY_PATH` must **append** to the image's own value, not replace it —
+replacing it costs you `libopenvino.so` and looks like a broken install.
+
 ## Phase 3 — packaging, only if Phases 0–2 pass
 
 - `Dockerfile` — OpenVINO runtime base, `requirements.txt`, no model baked in

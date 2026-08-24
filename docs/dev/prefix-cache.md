@@ -135,6 +135,15 @@ Windows' ~half-RAM iGPU policy and Intel's "Shared GPU Memory Override"
 driver setting; CPU: total RAM). It logs the KV pool's token capacity from
 `config.json` geometry — ~56 KB/token for a 7B coder, ~96 KB for 30B.
 
+"Total RAM" on the CPU path means `min(MemTotal, cgroup limit)`, not
+`/proc/meminfo` alone — inside a container `MemTotal` reports the **host**
+total, so a `--memory=4g` container sized a 4 GB KV pool on top of 1.6 GB of
+weights and warned about nothing [OBSERVED 2026-08-24, Docker 29.7.2 on WSL
+2.7.12; MemTotal 23.5 GB vs `/sys/fs/cgroup/memory.max` 4 GB]. That is
+issue #21 with extra steps. `_cgroup_mem_limit_bytes` reads cgroup v2 then
+v1 and treats `max`/sentinel values as no limit; the same container now
+sizes the 2 GB floor and prints the agent-prompt warning.
+
 A too-small pool **hard-fails** generation with `Got unfinished
 GenerationStatus` (issue #21); `explain_genai_error` annotates that error
 with a `--cache-size-gb` hint wherever it surfaces.

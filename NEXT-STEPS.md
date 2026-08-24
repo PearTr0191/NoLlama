@@ -5,6 +5,42 @@ the docs — this file is only what's still open.
 
 ## Open
 
+- **Docker/#31: Phases 0-2 measured 2026-08-24, container path works.** Full
+  results in `DOCKER-INSTALL.md`; the short version is that an Intel GPU is
+  usable from a container at native throughput (74-79 vs 76-78 tok/s, prefix
+  cache 1.9s → 0.3s vs 2.1s → 0.2s native), and two NoLlama bugs surfaced and
+  were fixed on the way:
+
+  1. **cgroup-blind memory sizing** (`_cgroup_mem_limit_bytes`): a
+     `--memory=4g` container sized a 4 GB KV pool from the host's 23.5 GB
+     `MemTotal`. Now `min(MemTotal, cgroup limit)`, v2 and v1.
+  2. **WSL `/dev/dxg` 1 GiB allocation cap** (`_gpu_large_alloc_props`): the
+     same B60 reports 25,055,051,776 bytes max-alloc natively and exactly
+     1,073,741,824 through a container, so Gemma 4 E2B's 2.2 GB per-layer
+     embedding table killed the load. A GPU whose max-alloc is below its own
+     total budget now gets `GPU_ENABLE_LARGE_ALLOCATIONS`. Native installs
+     take no hint and are unaffected.
+
+  Still open, in rough priority order:
+
+  - **`gemma-4-26b-a4b-it-int4-ov` produces deterministic garbage on the
+    container GPU path.** Correct natively, correct on CPU inside the same
+    container, correct on GPU for every other model tried including a 16 GB
+    MoE. Byte-identical gibberish across pipelines and runs, so it is a
+    compute defect, not corruption. Worth an upstream report against NEO
+    26.31 on the WSL /dev/dxg path — not filed.
+  - **Phase 3 packaging** — `Dockerfile` + `compose.yml` into the repo. The
+    working image is still only in a session scratchpad. Compose must bind
+    models under their real directory names, publish 8000 **and** 11434, and
+    give `/app` a writable volume or prewarm silently never persists.
+  - **Native Linux `/dev/dri` is still untested**, and it is what #31 asks
+    for. Neither limitation found here predicts the native answer.
+  - Why models needing the large-allocation hint load ~3x slower (E2B 11.5s
+    native vs 33-42.5s in-container; SmolLM3, which needs no hint, is at
+    parity).
+  - `_maybe_capture_prewarm` swallows `OSError`, so a read-only rootfs is a
+    silent cold start forever. Wants a log line.
+
 - **VLM slots are agent-grade (merged as PR #30 + the prewarm commit).**
   Three changes, all verified end-to-end 2026-08-18:
 
