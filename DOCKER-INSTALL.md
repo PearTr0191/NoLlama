@@ -104,6 +104,29 @@ not less.
 Cost is low: `wsl --update --pre-release` swaps a WSL component and reverts
 with `wsl --update --rollback`. It is **not** an Insider-channel change.
 
+### B1 result, measured 2026-08-24 — no NPU in WSL 2
+
+Run on the **Core Ultra 9 285K** (WSL 2.6.3.0, kernel 6.6.87.2, Ubuntu),
+which has a working `Intel(R) AI Boost` NPU showing status OK in Windows:
+
+```
+ls -la /dev/accel* /dev/dxg /dev/dri
+  /dev/accel*  -> No such file or directory     <- no NPU
+  /dev/dri     -> No such file or directory
+  /dev/dxg     -> crw-rw-rw- 10, 125            <- GPU paravirt present
+```
+
+So the NPU is genuinely absent from WSL 2, confirmed on hardware that has
+one rather than inferred from forum posts. `/usr/lib/wsl/lib` on that box
+holds 24 libraries, **all NVIDIA plus the D3D12 shims, zero Intel** - though
+that is expected and not itself a blocker: NVIDIA injects host libraries
+there, whereas Intel's WSL path is `intel-opencl-icd` /
+`intel-level-zero-gpu` installed **inside the distro**, talking to
+`/dev/dxg` via `libd3d12core.so`.
+
+Remaining question is therefore B2 only: does the WSL Containers preview
+(2.9.3+, that box is on 2.6.3.0) create an NPU device node?
+
 Cheapest first, stop at the first no:
 
 ```bash
