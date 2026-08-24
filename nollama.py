@@ -318,8 +318,49 @@ def parse_messages(messages, max_dim):
 # Memory preflight — warn (never block) when a model won't fit its device
 # ---------------------------------------------------------------------------
 
+def _cgroup_mem_limit_bytes():
+    """The container's memory ceiling in bytes, or None when unlimited/absent.
+
+    Why: inside a container /proc/meminfo still reports the *host* total, so
+    sizing the KV pool from it promises memory the container can never have —
+    a `--memory=4g` container was measured auto-sizing a 4 GB pool on top of
+    1.6 GB of weights [OBSERVED 2026-08-24, Docker 29.7.2 / WSL 2.7.12], which
+    is issue #21's `Got unfinished GenerationStatus` waiting to happen.
+
+    In: nothing. Out: bytes, or None on a bare host, on cgroup v2's literal
+    'max', or when the value is absurdly large (some runtimes write
+    PAGE_COUNTER_MAX rather than 'max' for "no limit").
+    """
+    for path in ("/sys/fs/cgroup/memory.max",                  # cgroup v2
+                 "/sys/fs/cgroup/memory/memory.limit_in_bytes"):  # cgroup v1
+        try:
+            with open(path) as f:
+                raw = f.read().strip()
+        except OSError:
+            continue
+        if raw == "max":
+            return None
+        try:
+            val = int(raw)
+        except ValueError:
+            continue
+        # v1 writes a near-2**63 sentinel for "unlimited"; anything past a
+        # petabyte is that sentinel, not a real ceiling.
+        if 0 < val < 2 ** 50:
+            return val
+    return None
+
+
 def _system_ram_bytes():
-    """Total physical RAM in bytes. None if it can't be determined."""
+    """RAM in bytes that this process may actually use. None if unknown.
+
+    Why: 'total physical RAM' is the wrong answer in a container — the cgroup
+    ceiling is lower and is the one the OOM killer enforces, so the smaller of
+    the two is what the KV pool and the preflight must size against.
+
+    In: nothing. Out: bytes, or None when neither source answers. A cgroup
+    limit larger than physical RAM (common — no limit set) is ignored.
+    """
     try:
         if os.name == "nt":
             import ctypes
@@ -338,7 +379,9 @@ def _system_ram_bytes():
             with open("/proc/meminfo") as f:
                 for line in f:
                     if line.startswith("MemTotal:"):
-                        return int(line.split()[1]) * 1024
+                        phys = int(line.split()[1]) * 1024
+                        limit = _cgroup_mem_limit_bytes()
+                        return min(phys, limit) if limit else phys
     except Exception:
         pass
     return None
@@ -368,6 +411,36 @@ def _device_mem_bytes(device_name, device_id):
 # turns the memory preflight into a false alarm on every run after the first.
 _CACHE_DIR_NAMES = {"model_cache", ".cache"}
 
+
+
+def _gpu_large_alloc_props(device_id):
+    """Plugin properties that let a single tensor exceed the driver's
+    per-allocation cap. Empty dict when the device doesn't need them.
+
+    Why: a GPU reached through WSL's /dev/dxg paravirtualization reports
+    CL_DEVICE_MAX_MEM_ALLOC_SIZE as exactly 1 GiB while reporting the card's
+    full 23.3 GB as total — so any model with a >1 GiB tensor dies at load
+    with "Exceeded max size of memory object allocation", and the same card
+    natively reports its whole budget as allocatable
+    [OBSERVED 2026-08-24, Arc Pro B60, container over WSL 2.7.12 vs native
+    Windows: 1073741824 vs 25055051776 bytes]. Gemma 4 E2B has a 2.2 GB
+    per-layer embedding table, so this is not an exotic case.
+
+    Gated on max_alloc < total rather than on "am I in a container", because
+    the cap is a property of how the device was reached, not of the sandbox.
+
+    In: an OpenVINO device id ("GPU", "GPU.1"). Out: {} on a device whose
+    driver already allows whole-budget allocations (every native install
+    measured), or when either property is unreadable — the hint is only ever
+    added, never used to disable anything.
+    """
+    try:
+        core = ov.Core()
+        total = int(core.get_property(device_id, "GPU_DEVICE_TOTAL_MEM_SIZE"))
+        max_alloc = int(core.get_property(device_id, "GPU_DEVICE_MAX_ALLOC_MEM_SIZE"))
+    except Exception:
+        return {}
+    return {"GPU_ENABLE_LARGE_ALLOCATIONS": True} if max_alloc < total else {}
 
 def _dir_size_bytes(model_dir):
     """Size of a model directory excluding cache subdirs (≈ weight bytes).
@@ -1255,11 +1328,18 @@ class DeviceSlot:
         # only does anything on XMX hardware (Arc dGPU, Lunar Lake 140V+) —
         # [OBSERVED 2026-08-06] Qwen3-30B-A3B int4 runs in 2.35 GB resident at
         # ratio 90 on a 140V, while non-XMX iGPUs silently ignore it (TODONT.md).
-        offload = {}
+        plugin_props = {}
         if OFFLOAD_RATIO > 0 and self.device_name == "GPU":
-            offload = {"OFFLOAD_RATIO": OFFLOAD_RATIO}
+            plugin_props["OFFLOAD_RATIO"] = OFFLOAD_RATIO
             print(f"  [{self.device_name}] MoE disk offload on "
                   f"({OFFLOAD_RATIO}% of expert weights streamed)", flush=True)
+        if self.device_name == "GPU":
+            large = _gpu_large_alloc_props(self.device_id)
+            if large:
+                plugin_props.update(large)
+                print(f"  [{self.device_name}] large allocations enabled — this "
+                      f"device caps a single allocation below its own memory "
+                      f"budget (WSL /dev/dxg does; native does not)", flush=True)
 
         if vlm:
             VLMPipe = getattr(ovg, "VLMPipeline", None)
@@ -1277,7 +1357,7 @@ class DeviceSlot:
                     sc.enable_prefix_caching = True
                     sc.cache_size = self.kv_pool_gb
                     self.pipe = VLMPipe(str(model_dir), device=self.device_id,
-                                        scheduler_config=sc, **offload)
+                                        scheduler_config=sc, **plugin_props)
                     src = "" if PROMPT_CACHE_GB is not None else \
                         ", auto-sized — pin with --cache-size-gb"
                     print(f"  [{self.device_name}] prefix caching on "
@@ -1287,10 +1367,10 @@ class DeviceSlot:
                           f"({e}); using plain pipeline", flush=True)
                     self.kv_pool_gb = 0  # no cache: report honestly, skip prewarm
                     self.pipe = VLMPipe(str(model_dir), device=self.device_id,
-                                        **offload)
+                                        **plugin_props)
             else:
                 self.pipe = VLMPipe(str(model_dir), device=self.device_id,
-                                    **offload)
+                                    **plugin_props)
         else:
             # NPU has a default prompt limit of 1024 tokens — raise it
             if self.device_name == "NPU":
@@ -1310,7 +1390,7 @@ class DeviceSlot:
                     sc.cache_size = self.kv_pool_gb
                     self.pipe = ovg.LLMPipeline(
                         str(model_dir), device=self.device_id, scheduler_config=sc,
-                        **offload,
+                        **plugin_props,
                     )
                     src = "" if PROMPT_CACHE_GB is not None else \
                         ", auto-sized — pin with --cache-size-gb"
@@ -1321,10 +1401,10 @@ class DeviceSlot:
                           f"({e}); using plain pipeline", flush=True)
                     self.kv_pool_gb = 0  # no cache: report honestly, skip prewarm
                     self.pipe = ovg.LLMPipeline(str(model_dir), device=self.device_id,
-                                                **offload)
+                                                **plugin_props)
             else:
                 self.pipe = ovg.LLMPipeline(str(model_dir), device=self.device_id,
-                                            **offload)
+                                            **plugin_props)
 
     def _resolve_kv_pool(self, vlm):
         """Set self.kv_pool_gb — the KV-cache pool for this slot's CB backend.
