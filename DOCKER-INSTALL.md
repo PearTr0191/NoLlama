@@ -105,8 +105,18 @@ NPU path cannot serve. But NoLlama is NPU-first and Windows-primary, so
 of this project's actual audience. Panther Lake makes it more interesting,
 not less.
 
-Cost is low: `wsl --update --pre-release` swaps a WSL component and reverts
-with `wsl --update --rollback`. It is **not** an Insider-channel change.
+Cost is low-ish: `wsl --update --pre-release` swaps a WSL component and is
+**not** an Insider-channel change.
+
+**Correction (2026-08-24): `wsl --update --rollback` does not exist.** This
+section previously claimed it as the undo, and that claim was never tested.
+On 2.9.8 it returns `Wsl/UpdatePackage/E_INVALIDARG`, and `wsl --help` lists
+no sub-options for `--update` at all. Reverting means installing an older MSI
+by hand from [microsoft/WSL releases](https://github.com/microsoft/WSL/releases)
+— 2.9.8 is flagged pre-release there; the current stable is **2.7.12**. So
+the switch is one command and the undo is a manual install. Still cheap, but
+not symmetric, and worth knowing before you do it to a machine you care
+about.
 
 ### B1 result, measured 2026-08-24 — no NPU in WSL 2
 
@@ -202,7 +212,11 @@ If B3 succeeds, apply the same suspicion as everywhere else in this project:
 **enumeration is not correctness**. Run the probe set and compare against the
 NPU numbers already in `docs/dev/models.md` before believing it.
 
-Roll back with `wsl --update --rollback` when done, unless it works.
+Rolling back is a manual MSI install, not a flag — see the correction above.
+The 285K was left on 2.9.8 after B2: WSL is unused on that box, and the
+re-check trigger in TODONT wants `wslc` present anyway. If that box ever
+becomes a measurement machine, revert it to stable first — this project
+measures on shipped stacks.
 
 ---
 
