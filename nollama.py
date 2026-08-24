@@ -20,7 +20,7 @@ Usage:
 # also reports its short commit (see _version_string below), so a bug report
 # names the exact tree. Nothing parses this: the version VS Code's Ollama client
 # validates is a separate faked one on /api/version.
-__version_date__ = "2026-08-18"
+__version_date__ = "2026-08-24"
 
 import argparse
 import base64
