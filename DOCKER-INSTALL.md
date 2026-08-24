@@ -9,6 +9,40 @@ Desktop Linux containers ([WSL #40842](https://github.com/microsoft/WSL/issues/4
 paravirtualized NPU passthrough was announced for **WSL 3** at Build 2026 but
 has not shipped. Anything we publish says "no NPU" in plain words.
 
+## Ground rules
+
+**No model downloads into a container. Ever.** Pulling 4-20 GB into a
+throwaway is wasteful and pointless when the host already has the weights.
+This is not a preference, it is a design constraint on everything below:
+
+- Models are **bind-mounted read-only** from the host's models directory.
+- The image is **model-free**. Nothing baked in, nothing fetched at build or
+  run time. (Also the licence-clean choice: baking Gemma weights into an
+  image is a redistribution question under the Gemma Terms. Avoided entirely
+  by never doing it.)
+- If a test seems to need a model we do not have, the test is wrong.
+
+That makes bind-mounting mandatory rather than incidental, which promotes
+hazards **1.1** (mount path vs the naming rule) and **1.4** (integrity check
+over drvfs) from "worth checking" to "on the critical path".
+
+### What is already on disk, and what each is for
+
+| Model | Size | Use in this protocol |
+|---|---|---|
+| `SmolLM3-3B-int4-cw-ov` | 1.6 GB | **Default.** Plumbing, ports, streaming, restarts - smallest thing that proves the path |
+| `gemma-4-E2B-it-int4-ov` | 4.1 GB | VLM path + the probe set; prefix-cache cold-vs-repeat |
+| `Qwen2.5-VL-3B-Instruct-int8-ov` | 3.9 GB | Second VLM opinion if a result looks odd |
+| `gemma-4-E4B-it-int8-ours` | 7.8 GB | Parity against the 1.16 s steady-state TTFT already measured |
+| `gemma-4-26b-a4b-it-int4-ov` | 15 GB | **Only** for hazard 1.3 - the WSL2 memory-cap question needs a big model to be a question at all |
+
+Iterate on SmolLM3. Touch the 26B once, deliberately, for 1.3.
+
+Copying **one** small model onto the WSL2 ext4 filesystem is allowed for the
+1.4 drvfs-vs-native timing comparison - that is a local copy, not a download.
+
+---
+
 ## How bleeding-edge are we willing to be?
 
 Standing rule, unchanged: **test on nightly, ship on release.** That is what
@@ -161,8 +195,10 @@ figures are in `docs/dev/models.md` and `docs/MODELS.md`.
 | `aweussom/gemma-4-E4B-it-int8-ov` steady TTFT | 1.16 s | ? |
 | probe set correctness | 7 cases, known answers | must match exactly |
 
-Reuse the harness in the scratchpad (`probe2.py`, the synthetic images) —
-identical inputs, so any divergence is the container, not the prompt.
+Reuse the probe harness — identical inputs, so any divergence is the
+container and not the prompt. **It currently lives in a session scratchpad
+and will vanish**; move it into the repo alongside `qa_vlm.py` before relying
+on this section.
 
 **A tok/s gap is publishable either way.** "Containers cost X%" is useful;
 "containers are free" is more useful.
