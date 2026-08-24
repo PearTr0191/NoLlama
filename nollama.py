@@ -413,34 +413,77 @@ _CACHE_DIR_NAMES = {"model_cache", ".cache"}
 
 
 
-def _gpu_large_alloc_props(device_id):
-    """Plugin properties that let a single tensor exceed the driver's
-    per-allocation cap. Empty dict when the device doesn't need them.
+def _largest_weight_tensor_bytes(model_dir):
+    """Size of the biggest single weight blob any IR in this directory
+    declares. None if nothing is readable.
 
-    Why: a GPU reached through WSL's /dev/dxg paravirtualization reports
-    CL_DEVICE_MAX_MEM_ALLOC_SIZE as exactly 1 GiB while reporting the card's
-    full 23.3 GB as total — so any model with a >1 GiB tensor dies at load
-    with "Exceeded max size of memory object allocation", and the same card
-    natively reports its whole budget as allocatable
-    [OBSERVED 2026-08-24, Arc Pro B60, container over WSL 2.7.12 vs native
-    Windows: 1073741824 vs 25055051776 bytes]. Gemma 4 E2B has a 2.2 GB
-    per-layer embedding table, so this is not an exotic case.
+    Why: the GPU plugin allocates per constant, so the largest single tensor —
+    not the largest `.bin`, and not the directory total — is the biggest one
+    allocation a load attempts, and it is what a per-allocation cap has to be
+    compared against. The distinction is load-bearing, not pedantic
+    [OBSERVED 2026-08-24, WSL container, 1 GiB cap: SmolLM3-3B loads fine with
+    a 1.56 GB .bin because its constants are many and small, while Gemma 4
+    E2B dies on a single 2,348,810,240-byte request — which happens to be its
+    whole per-layer-embeddings .bin, one enormous constant].
 
-    Gated on max_alloc < total rather than on "am I in a container", because
-    the cap is a property of how the device was reached, not of the sandbox.
+    Reads the same `offset="N" size="M"` attributes as
+    `_verify_weights_integrity`, taking max(size) where that takes
+    max(offset+size). **Do not unify them**: one asks "how big is the biggest
+    piece", the other "how far into the file does the last piece end". They
+    coincide only for a single-constant IR.
 
-    In: an OpenVINO device id ("GPU", "GPU.1"). Out: {} on a device whose
-    driver already allows whole-budget allocations (every native install
-    measured), or when either property is unreadable — the hint is only ever
-    added, never used to disable anything.
+    In: a model directory; every `.xml` in it is scanned. Out: bytes, or None
+    when no IR declares a weight blob (an int8 graph with no constants, an
+    unreadable directory).
     """
     try:
-        core = ov.Core()
-        total = int(core.get_property(device_id, "GPU_DEVICE_TOTAL_MEM_SIZE"))
-        max_alloc = int(core.get_property(device_id, "GPU_DEVICE_MAX_ALLOC_MEM_SIZE"))
+        names = [f for f in os.listdir(model_dir) if f.endswith(".xml")]
+    except OSError:
+        return None
+    biggest = 0
+    for name in names:
+        try:
+            with open(os.path.join(model_dir, name), "rb") as f:
+                data = f.read()
+        except OSError:
+            continue
+        for m in re.finditer(rb'offset="(\d+)" size="(\d+)"', data):
+            biggest = max(biggest, int(m.group(2)))
+    return biggest or None
+
+
+def _gpu_large_alloc_props(device_id, model_dir):
+    """Plugin properties letting one weights buffer exceed the driver's
+    per-allocation cap. Empty dict unless this model actually needs them.
+
+    Why: a per-allocation cap far below the total budget is the NORMAL case,
+    not a fault — the OpenCL spec only guarantees a quarter of global memory
+    [OBSERVED 2026-08-24, native Windows: Arc Pro B60 allows its full
+    25,055,051,776; a Xe-LPG iGPU 4,294,959,104 of 35,346,505,728 (0.12); an
+    RTX 5090 exactly 0.25. The same B60 through WSL /dev/dxg allows only
+    1,073,741,824 while still reporting the full total]. So "cap below total"
+    cannot be the trigger; it would fire on every iGPU NoLlama exists to
+    serve. The only question is whether *this model's* biggest buffer fits
+    under *this device's* cap.
+
+    Comparing against the model is also what makes it right off WSL entirely:
+    a big enough model meets the iGPU's ~4 GB cap natively and wants the same
+    hint for the same reason.
+
+    In: an OpenVINO device id ("GPU", "GPU.1") and a model directory. Out: {}
+    when the model fits, or when either number is unreadable — the hint is
+    added only on positive evidence, never guessed.
+    """
+    try:
+        max_alloc = int(ov.Core().get_property(device_id,
+                                               "GPU_DEVICE_MAX_ALLOC_MEM_SIZE"))
     except Exception:
         return {}
-    return {"GPU_ENABLE_LARGE_ALLOCATIONS": True} if max_alloc < total else {}
+    biggest = _largest_weight_tensor_bytes(model_dir)
+    if not biggest or biggest <= max_alloc:
+        return {}
+    return {"GPU_ENABLE_LARGE_ALLOCATIONS": True}
+
 
 def _dir_size_bytes(model_dir):
     """Size of a model directory excluding cache subdirs (≈ weight bytes).
@@ -1334,12 +1377,12 @@ class DeviceSlot:
             print(f"  [{self.device_name}] MoE disk offload on "
                   f"({OFFLOAD_RATIO}% of expert weights streamed)", flush=True)
         if self.device_name == "GPU":
-            large = _gpu_large_alloc_props(self.device_id)
+            large = _gpu_large_alloc_props(self.device_id, model_dir)
             if large:
                 plugin_props.update(large)
-                print(f"  [{self.device_name}] large allocations enabled — this "
-                      f"device caps a single allocation below its own memory "
-                      f"budget (WSL /dev/dxg does; native does not)", flush=True)
+                print(f"  [{self.device_name}] large allocations enabled — a "
+                      f"weights buffer in this model exceeds the device's "
+                      f"per-allocation cap", flush=True)
 
         if vlm:
             VLMPipe = getattr(ovg, "VLMPipeline", None)
