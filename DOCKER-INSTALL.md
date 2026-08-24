@@ -6,8 +6,17 @@ with measurements. Docker/WSL install is assumed done.
 **Out of scope, decided:** the NPU. It is not exposed to WSL2 or Docker
 Desktop Linux containers ([WSL #40842](https://github.com/microsoft/WSL/issues/40842),
 [Intel Community](https://community.intel.com/t5/Graphics/NPU-in-WSL/td-p/1581143));
-paravirtualized NPU passthrough was announced for **WSL 3** at Build 2026 but
-has not shipped. Anything we publish says "no NPU" in plain words.
+Anything we publish says "no NPU" in plain words.
+
+**Correction (2026-08-24): there is no "WSL 3".** Microsoft
+[denied it](https://www.windowslatest.com/2026/06/28/microsoft-denies-wsl-3-exists-reveals-windows-11s-wsl-containers-ship-next-week/)
+- what Build 2026 announced is **WSL Containers**, built on WSL 2, and much
+of the press mislabelled it. It is in public preview via
+`wsl --update --pre-release` (WSL 2.9.3+), GA targeted for autumn 2026
+([devblog](https://devblogs.microsoft.com/commandline/wsl-container-is-now-available-for-public-preview/)).
+Whether it changes the NPU answer is **unverified** - that claim came from
+the same mislabelled reporting, so treat it as rumour until someone runs
+`available_devices` inside it.
 
 ## Ground rules
 
@@ -56,13 +65,23 @@ every layer below it is on a release.
 | WSL 2 | GPU via `/dev/dxg` | shipped | fine |
 | Intel compute-runtime | GPU inside the distro/container | current **release** on GitHub; Ubuntu's packaged build lags for Battlemage | fine — an upstream release, just not the distro's |
 | OpenVINO | the runtime itself | 2026.3 release works natively; nightly image available if the container needs newer | test on nightly, ship on release |
-| **WSL 3** | **NPU** passthrough | **preview only** (Build 2026, unshipped) | test-only, and see the warning below |
+| WSL Containers | nothing we need | public preview, GA autumn 2026 | **skip** - see below |
 
-**Do not put this box on the Windows Insider channel for the NPU question.**
-It is the B60 machine every measurement in `docs/` was taken on; trading its
-stability for a preview feature we have already decided not to ship is a bad
-trade. If NPU-in-container becomes interesting, it wants a scratch machine
-and its own decision.
+**We do not want WSL Containers.** It is a container runtime inside WSL 2 for
+running Linux containers on Windows without Docker Desktop - and every
+benefit it offers is already covered by running plain `docker-ce` inside the
+WSL 2 distro, which also dodges the Docker Desktop licence.
+
+The deciding argument is portability. #31 asks for **Linux** deployment: a
+`Dockerfile` and `compose.yml` built against ordinary `docker-ce` run on the
+requester's hardware. Anything WSL-Containers-specific is Windows-only and
+does not serve the request that prompted this work.
+
+The one thing that could change that is its rumoured NPU passthrough - but
+that claim comes from the same mislabelled "WSL 3" reporting, and even if it
+holds it would be a Windows-only NPU path: nice for local dev, irrelevant to
+#31, and NPU is scoped out anyway. Re-check only if someone demonstrates
+`available_devices` listing NPU inside it.
 
 So the realistic target for this experiment is **GPU and CPU only**, which is
 also exactly what #31 can honestly be offered.
@@ -142,9 +161,13 @@ Loading a big model peaks at roughly model-sized host RAM even on a discrete
 card (recorded in `NEXT-STEPS.md`). WSL2 caps its VM at ~50% of host RAM by
 default — on this 32 GB box that is ~16 GB, and the 26B needs 14.3 GB.
 
-**Test:** load `gemma-4-26b-a4b-it-int4-ov` in-container. **Expect** either a
-clean load or a clear OOM. If it thrashes, document the `.wslconfig`
-`memory=` requirement rather than pretending it fits.
+A `.wslconfig` was created 2026-08-24 in the user profile setting
+`memory=24GB`, `swap=16GB` and `autoMemoryReclaim=gradual` precisely for
+this, so the test measures the model rather than the default ceiling.
+
+**Test:** load `gemma-4-26b-a4b-it-int4-ov` in-container. **Expect** a clean
+load. **Also record** what it needs, because anything we ship must state the
+`.wslconfig` requirement - a 32 GB box on defaults would thrash.
 
 ### 1.4 Weight integrity check over a bind mount
 
