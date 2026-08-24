@@ -178,9 +178,11 @@ sudo docker run --rm --device /dev/dri -p 8000:8000 -p 11434:11434 \
   nollama:local --model-dir /models/SmolLM3-3B-int4-cw-ov --device GPU
 ```
 
-Watch the log for the line `large allocations enabled`. **On native Linux it
-should NOT appear** — that is the same finding as Step 2, confirmed through
-NoLlama's own detection logic (`_gpu_large_alloc_props`).
+Watch for the line `large allocations enabled`. It fires when a model's
+biggest single tensor exceeds the device's per-allocation cap — so for
+SmolLM3 (biggest tensor 0.24 GB) it should **not** appear on any device.
+Seeing it there would mean the cap is under 0.24 GB, which would be
+remarkable and worth reporting on its own.
 
 Then, from another terminal:
 
@@ -194,11 +196,22 @@ curl -s -X POST localhost:8000/v1/chat/completions -H 'Content-Type: application
 
 ## Step 5 — the E2B large-allocation case
 
-Only interesting if Step 2 said the budget is capped. If it said FULL BUDGET,
-E2B should simply load with no hint and no drama — which is the confirmation.
+E2B is the test case because its per-layer embedding table is a **single
+2.19 GB tensor** — 2,348,810,240 bytes, the exact request that fails under
+WSL's 1 GiB cap. Any device whose cap exceeds that loads it without a hint.
 
-Same command as above with `gemma-4-E2B-it-int4-ov`. Record load time; on
-Windows it is 11.5s native and 33-42.5s in-container with the hint active.
+Same command as above with `gemma-4-E2B-it-int4-ov`. Two things to record:
+
+- whether `large allocations enabled` appears. If Step 2 reported a cap
+  above 2.19 GB it must not, and that is the confirmation.
+- load time. On Windows: 11.5s native, 33-42.5s in-container with the hint
+  active. Whether that 3x is the hint's cost or WSL's is still unknown — a
+  native Linux number for a model that needs **no** hint helps separate them.
+
+Note the cap does not have to equal total memory to be fine. OpenCL only
+guarantees a quarter of global memory, and a Xe-LPG iGPU measured 0.12 of
+total — 4.29 GB, still comfortably above E2B's biggest tensor. "Capped" and
+"broken" are different findings; report the number, not a verdict.
 
 ## Step 6 — the defect, if RAM allows
 
