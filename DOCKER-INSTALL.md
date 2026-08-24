@@ -505,8 +505,33 @@ It is also not "big models" or "MoE models" — those were checked:
 | `gemma-4-26b-a4b-it-int4-ov` (MoE) | 15 GB | **garbage** |
 
 One model, one path. Determinism says compute defect, not memory
-corruption — which makes it a clean upstream report against NEO 26.31 on
-the WSL /dev/dxg path. Not filed yet.
+corruption.
+
+Two further axes were checked, and both came back negative:
+
+- **Driver version.** Rebuilt on NEO **25.44.36015.8** with matching IGC
+  2.24.8 — a full generation back. Byte-identical garbage. Not a recent
+  regression. (`GPU_DEVICE_MAX_ALLOC_MEM_SIZE` is 1 GiB on both releases
+  too, so the allocation cap is a property of `/dev/dxg`, not of a driver
+  version.)
+- **Inference precision.** The fp16-overflow hypothesis that the Gemma
+  family invites does not survive: native inference is fp16 by default and
+  is correct. Forcing `INFERENCE_PRECISION_HINT=f32` in the container does
+  not answer it either — that configuration fails to compile at all, in the
+  GPU plugin's layout handling (`_type: any (format: bfyx, data_type: f32)`,
+  shape `[?,8]`), so f32 is untestable here rather than clean.
+
+Also ruled out by construction: NoLlama itself. The garbage reproduces
+through a raw `openvino_genai.VLMPipeline` with none of our serving code in
+the path.
+
+That leaves the WSL `/dev/dxg` paravirtualization layer and this one
+model's kernels. Clean upstream report; not filed yet. What would sharpen it
+is a second gemma-4 **MoE** export to compare against — the int8 of the same
+model is ~26 GB, which will not fit the card, so that test is not available
+here. Gemma-4 *dense* is already known good on this path (E2B, E4B), and a
+non-Gemma MoE is too (Qwen3-30B-A3B), so the suspect is specifically
+gemma-4-MoE-on-dxg.
 
 This is why Phase 0's "enumeration is not correctness" rule earns its place:
 every check short of reading the output says this model is fine.
@@ -546,14 +571,23 @@ docker run --device /dev/dxg -v /usr/lib/wsl:/usr/lib/wsl \
 `LD_LIBRARY_PATH` must **append** to the image's own value, not replace it —
 replacing it costs you `libopenvino.so` and looks like a broken install.
 
-## Phase 3 — packaging, only if Phases 0–2 pass
+## Phase 3 — packaging — DONE 2026-08-24
 
-- `Dockerfile` — OpenVINO runtime base, `requirements.txt`, no model baked in
-- `docker-compose.yml` — ports 8000 + 11434, models bind-mounted **under
-  their real directory names** (1.1), device + `/usr/lib/wsl` passthrough
-- `.gitattributes` — `export-ignore` if it stays unsupported
-- `docs/` — a section stating GPU/CPU only, no NPU, with the measured
-  overhead and the `.wslconfig` caveat if 1.3 hit it
+- `Dockerfile` — **not** the OpenVINO runtime base (see TODONT): Ubuntu
+  24.04 + upstream compute-runtime, NEO/IGC/GMM pinned as build args that
+  move as a set. Model-free, 1.28 GB
+- `requirements-container.txt` — serving deps only. Dropping the export half
+  costs the `--backend optimum` path inside the image; documented
+- `docker-compose.yml` — native Linux `/dev/dri`, **untested**, marked as
+  such in the file itself. Publishes 8000 **and** 11434, binds models under
+  their real directory names (1.1), `/state` volume for prewarm (1.7)
+- `docker-compose.wsl.yml` — the measured configuration: `/dev/dxg` +
+  `/usr/lib/wsl`. Verified end-to-end from the repo files, both ports
+- `.dockerignore` — keeps the venvs and models out of the build context
+- `docs/DOCKER.md` — user-facing: no NPU in plain words, the `.wslconfig`
+  requirement, the overhead numbers, and both defects
+- `.gitattributes` — no `export-ignore`: the container path is measured and
+  documented, not vestigial
 
 ## Closing out
 
