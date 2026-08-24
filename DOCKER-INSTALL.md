@@ -93,6 +93,46 @@ the next, and an early stop is a valid answer for #31.
 
 ---
 
+## Track B — NPU in a container (separate question, worth asking)
+
+Keep this **separate from #31**, which is a Linux deployment request that an
+NPU path cannot serve. But NoLlama is NPU-first and Windows-primary, so
+"Windows-only" is not the disqualifier it would be for the issue - it is most
+of this project's actual audience. Panther Lake makes it more interesting,
+not less.
+
+Cost is low: `wsl --update --pre-release` swaps a WSL component and reverts
+with `wsl --update --rollback`. It is **not** an Insider-channel change.
+
+Cheapest first, stop at the first no:
+
+```bash
+# B1. does stock WSL2 expose anything NPU-shaped at all?
+wsl -e ls -la /dev/accel /dev/accel0 2>/dev/null || echo "no accel device"
+
+# B2. if not, try the WSL Containers preview
+wsl --update --pre-release && wsl --shutdown
+wsl -e ls -la /dev/accel* 2>/dev/null || echo "still nothing"
+
+# B3. only if a device node appears: userspace + enumeration
+#     needs intel-npu-driver matching the HOST driver version
+wsl -e bash -c '~/ovtest/bin/python -c "import openvino as ov; print(ov.Core().available_devices)"'
+```
+
+| Result | Meaning |
+|---|---|
+| `NPU` listed **and** generates coherently | Genuinely new. Worth writing up publicly - nobody has shown this working |
+| device node but no `NPU` device | Userspace/kernel version mismatch; recoverable, needs matching `intel-npu-driver` |
+| no `/dev/accel*` in either mode | The rumour is false. Record it in `TODONT.md` and stop |
+
+If B3 succeeds, apply the same suspicion as everywhere else in this project:
+**enumeration is not correctness**. Run the probe set and compare against the
+NPU numbers already in `docs/dev/models.md` before believing it.
+
+Roll back with `wsl --update --rollback` when done, unless it works.
+
+---
+
 ## Phase 0 — gating: is the GPU visible *and correct* inside a container?
 
 Visibility is not usability. This project has already been burned by a device
