@@ -47,6 +47,7 @@ never inside.
 | `docs/dev/models.md` | model discovery/naming, `--scan`, weight integrity, `download-model.ps1`, NPU export rule, the verified-model list |
 | `docs/dev/runtime-stacks.md` | installs, dependency pins, which venv runs what, genai vs optimum backend |
 | `docs/dev/moe-offload.md` | `--offload-ratio` and anything XMX-dependent |
+| `docs/dev/machines.md` | which box to run a test on, and which one is off-limits |
 | `TODONT.md` | **anything structural** — it records approaches already rejected, with the reason |
 | `NEXT-STEPS.md` | what is currently open/unresolved |
 | `docs/DIAGRAMS.md` + `docs/*.mmd` | any function a diagram `covers:` — the diagram moves in the same commit, and `.\check-docs.ps1` says which |

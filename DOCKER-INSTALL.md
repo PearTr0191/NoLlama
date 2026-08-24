@@ -93,6 +93,10 @@ the next, and an early stop is a valid answer for #31.
 
 ---
 
+> **Machines:** see `docs/dev/machines.md`. Short version — the B60 box is
+> the clean Intel GPU test, the 285K is the only NPU box available, and the
+> **258V laptop is off-limits: do not touch WSL, Docker or drivers on it.**
+
 ## Track B — NPU in a container (separate question, worth asking)
 
 Keep this **separate from #31**, which is a Linux deployment request that an
