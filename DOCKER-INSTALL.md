@@ -131,6 +131,23 @@ there, whereas Intel's WSL path is `intel-opencl-icd` /
 Remaining question is therefore B2 only: does the WSL Containers preview
 (2.9.3+, that box is on 2.6.3.0) create an NPU device node?
 
+**Primary source checked 2026-08-24, and it does not support the rumour.**
+Microsoft's own WSL Containers announcement mentions GPU exactly once — a
+CUDA example, `wslc run --rm --gpus all …` — and says nothing about NPU, AI
+accelerators or `/dev/accel` anywhere. Its only performance claim is a
+virtiofs filesystem speedup. The NPU-passthrough story lives entirely in
+secondary coverage ([TechTimes](https://www.techtimes.com/articles/317598/20260602/wsl-3-build-2026-near-native-gpu-npu-passthrough-brings-local-ai-windows.htm),
+[byteiota](https://byteiota.com/wsl3-gpu-npu-passthrough-windows-ai-dev/),
+[it-connect](https://www.it-connect.tech/microsoft-unveils-wsl-3-and-wsl-containers-for-windows/)),
+all of it under the "WSL 3" name Microsoft denied, and several pieces name
+Meteor Lake and Lunar Lake specifically — a detail with no primary source
+behind it.
+
+That does not make B2 pointless; a devblog announcing a container feature is
+not obliged to enumerate every device node. It does mean the prior is low,
+and that the only evidence that will settle it is `ls /dev/accel*` inside
+the preview.
+
 Cheapest first, stop at the first no:
 
 ```bash
