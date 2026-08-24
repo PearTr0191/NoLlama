@@ -32,8 +32,23 @@ not take its default ~50% share and squeeze this further.
 
 Reachable over SSH at `wossn@100.98.33.88` (Tailscale-range address). **The
 SSH shell is PowerShell, not bash** — `uname`, `/dev/null` and `2>/dev/null`
-all mangle, and the login profile prints a shortcut banner that contaminates
-piped output. Filter it, or run the filtering locally.
+all mangle, and PowerShell quoting inside a bash-side `ssh '...'` is a
+reliable source of `SyntaxError`. Copy a script over and run that instead of
+fighting the quoting.
+
+**The banner problem is fixed (2026-08-24).** The login profile used to print
+a shortcut banner and PSReadLine errors into every non-interactive session,
+which contaminated piped output and made `scp` fail outright with `Received
+message too long`. The profile now returns early when stdio is redirected
+(`[Console]::IsOutputRedirected -or ::IsInputRedirected`), so `scp`, `sftp`
+and `ssh host <command>` are all clean. The coreutils block below that guard
+still loads, so aliases non-interactive scripts might use keep working.
+Backup of the original: `Microsoft.PowerShell_profile.ps1.bak-20260824`
+beside the profile.
+
+Its NoLlama venv is on **OpenVINO 2026.1**, not 2026.3 — gemma-4 VLM loads
+fail there with `vlm_config.cpp:34`, and an LFM2 export dies on a broadcast
+shape. Neither is a model defect; check the version before blaming a model.
 
 | | |
 |---|---|
