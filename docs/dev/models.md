@@ -126,7 +126,12 @@ on the LFM2 family, where no good int8 NPU variant exists (see
     instead for agent work — our re-export of the same weights, fused
     attention, prefix caching working, byte-identical answers. Intel's is
     still the better pick for one-shot vision, being ~2.2x faster on a cold
-    turn.
+    turn. Reconfirmed on second hardware [OBSERVED 2026-08-24, Xe-LPG iGPU on
+    the 285K, OpenVINO 2026.3]: Intel's build logs `prefix caching
+    unavailable (has_op_with_type<ScaledDotProductAttention> failed at
+    sdpa_to_paged_attention.cpp:82)` and falls back to the plain pipeline,
+    while the re-export logs `prefix caching on` — same prompt, both answer
+    correctly. The defect travels with the IR, not with the GPU.
   - `26b-a4b-it-int4-ov` (14.3 GB, INT4-AWQ, MoE 128 experts, 30 layers,
     262k context) — the best of the three and prefix caching works, but its
     KV is **240 KB/token**, so the auto-sizer hits its 2 GB floor and buys

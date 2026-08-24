@@ -46,9 +46,21 @@ still loads, so aliases non-interactive scripts might use keep working.
 Backup of the original: `Microsoft.PowerShell_profile.ps1.bak-20260824`
 beside the profile.
 
-Its NoLlama venv is on **OpenVINO 2026.1**, not 2026.3 — gemma-4 VLM loads
-fail there with `vlm_config.cpp:34`, and an LFM2 export dies on a broadcast
-shape. Neither is a model defect; check the version before blaming a model.
+Its NoLlama venv was on **OpenVINO 2026.1** and was upgraded to **2026.3** on
+2026-08-24 — byte-identical build strings to the B60 box, so results from the
+two are now comparable.
+
+Two failures seen there on 2026.1, and re-tested after the upgrade, because
+"old runtime" is a tempting explanation that is only sometimes the right one:
+
+| Failure on 2026.1 | On 2026.3 | Verdict |
+|---|---|---|
+| gemma-4 VLM dies at `vlm_config.cpp:34` | loads and answers | **version gap** — gemma-4 VLM needs 2026.3 |
+| `LFM2-1.2B-int4-cw` dies on a broadcast shape (`infer_request.cpp:224`, dim 19 vs 10) | **still dies**, now at warmup | **not** the version. That export, or LFM2 support generally, is broken |
+
+Also carries the local LFM2 quant experiments (several `LFM2-*` directories)
+— those are the owner's, not project models, and at least one of them does
+not load.
 
 | | |
 |---|---|
