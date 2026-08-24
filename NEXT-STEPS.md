@@ -33,6 +33,10 @@ the docs — this file is only what's still open.
     working image is still only in a session scratchpad. Compose must bind
     models under their real directory names, publish 8000 **and** 11434, and
     give `/app` a writable volume or prewarm silently never persists.
+  - **NPU in a container: closed 2026-08-24, the answer is no.** 285K taken
+    to WSL 2.9.8.0 (WSL Containers preview): no `/dev/accel*` in either
+    channel, and `wslc run` exposes `--gpus` and no device flag at all, so
+    there is no way to even ask for one. See TODONT.
   - **Native Linux `/dev/dri` is still untested**, and it is what #31 asks
     for. Neither limitation found here predicts the native answer.
   - Why models needing the large-allocation hint load ~3x slower (E2B 11.5s

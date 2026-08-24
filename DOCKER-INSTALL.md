@@ -148,7 +148,36 @@ not obliged to enumerate every device node. It does mean the prior is low,
 and that the only evidence that will settle it is `ls /dev/accel*` inside
 the preview.
 
-Cheapest first, stop at the first no:
+### B2 result, measured 2026-08-24 — WSL Containers does not expose the NPU
+
+Run on the **285K** after `wsl --update --pre-release` took it from WSL
+2.6.3.0 to **2.9.8.0** (kernel 6.18.40.1), well past the 2.9.3 that gates
+the WSL Containers preview. `wslc.exe` present at `C:\Program Files\WSL\`.
+
+Four checks, cheapest first:
+
+| Check | Result |
+|---|---|
+| `/dev/accel*` in a normal distro on 2.9.8 | absent — only `/dev/dxg`, exactly as on 2.6.3.0 |
+| `/dev` in `wslc run --rm alpine` | minimal set; **no `dxg`, no `accel`** |
+| `/dev` in `wslc run --rm --gpus all alpine` | `dxg` appears — **and nothing else** |
+| `wslc run --help` hardware flags | `--gpus` is the **only** one. No `--device`, no NPU flag, no privileged mode |
+
+That last row is the decisive one and it is not a measurement that can drift:
+the CLI has no way to ask for an NPU, so no amount of driver work inside the
+container reaches one. GPU passthrough is real and goes through the same
+`/dev/dxg` paravirtualization WSL 2 already had — not a new mechanism.
+
+**Verdict: the "WSL 3 brings NPU passthrough" reporting is false for what
+actually shipped.** Combined with the primary-source check above (Microsoft's
+own announcement mentions GPU once and NPU never), the story is closed: every
+claim traces to secondary coverage under a product name Microsoft denied.
+
+Re-open only if a future WSL release adds a device-passthrough flag. The
+check is `wslc run --help` and takes ten seconds.
+
+The commands, kept for the record (B1 and B2 both ran; B3 was never
+reached because no device node appeared):
 
 ```bash
 # B1. does stock WSL2 expose anything NPU-shaped at all?
@@ -559,8 +588,10 @@ every check short of reading the output says this model is fine.
   Both limitations found here (the 1 GiB cap, the stock image's driver age)
   are artefacts of the WSL path or of one vendor image; neither predicts the
   native answer. No claim either way.
-- **Track B / B2** — the WSL Containers preview and NPU. Unchanged: B1 says
-  no NPU in stock WSL 2, B2 is still unrun (that box is on WSL 2.6.3.0).
+- ~~Track B / B2~~ — **answered 2026-08-24, and the answer is no.** The
+  285K is now on WSL 2.9.8.0 with the WSL Containers preview; there is no
+  NPU device node in either channel and `wslc run` has no device-passthrough
+  flag. Full chain in the B2 section above and in TODONT.md.
 - The 26B defect's cause.
 - Whether the large-allocation hint is what costs E2B its 3x load time.
 

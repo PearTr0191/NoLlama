@@ -3,6 +3,46 @@
 Things we tried that didn't work, or that work but aren't worth doing. Each
 entry explains *why not* so we don't re-litigate it in six months.
 
+## Waiting for WSL to expose the NPU to containers (2026-08-24)
+
+Idea: NoLlama is NPU-first, so a container path that reaches the NPU would
+be worth having even though it is Windows-only. Build 2026 coverage promised
+exactly that — "WSL 3" with GPU **and** NPU passthrough, several outlets
+naming Meteor Lake and Lunar Lake specifically.
+
+**Verdict:** the reporting is wrong. There is no NPU in WSL, in either the
+stable or the preview channel. Stop waiting for it.
+
+**Why not**, in the order the evidence arrived:
+
+- **There is no "WSL 3".** Microsoft denied the name; what Build 2026
+  announced is **WSL Containers**, built on WSL 2. Much of the press
+  mislabelled it, and the NPU-passthrough claim rides along with the wrong
+  name.
+- **The primary source does not say it.** Microsoft's own WSL Containers
+  announcement mentions GPU exactly once — a CUDA example — and never
+  mentions NPU, AI accelerators or `/dev/accel`. Its only performance claim
+  is a virtiofs filesystem speedup.
+- **Stock WSL 2 has no NPU device node.** Measured on a Core Ultra 9 285K
+  with a healthy `Intel(R) AI Boost`: `/dev/accel*` does not exist, only
+  `/dev/dxg`. Confirmed on hardware rather than inferred (microsoft/WSL#40842).
+- **Neither does the preview.** Updated that box to WSL **2.9.8.0** (kernel
+  6.18.40.1) and re-checked: still no `/dev/accel*`. A `wslc` container gets
+  a minimal `/dev` with no `dxg` at all; `wslc run --gpus all` adds `dxg`
+  **and nothing else**.
+- **The CLI cannot express the request.** `wslc run` has exactly one
+  hardware-passthrough flag, `--gpus`. No `--device`, no NPU flag, no
+  privileged mode. That is not a driver gap that userspace work could close
+  — there is no way to ask.
+
+So the container story for NoLlama is GPU and CPU, on every platform, and
+anything we publish says "no NPU" in plain words.
+
+Re-evaluate only on a concrete trigger: a WSL release whose `wslc run --help`
+grows a device-passthrough flag, or a `/dev/accel*` node appearing in a
+distro. Both are ten-second checks. Do not re-open this on press coverage —
+that is what sent us round the loop the first time.
+
 ## The stock `openvino/ubuntu24_runtime` image as the container base (2026-08-24)
 
 Idea: Intel publishes an OpenVINO runtime image; use it as the base for a
