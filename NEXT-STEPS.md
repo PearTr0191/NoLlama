@@ -38,7 +38,10 @@ the docs — this file is only what's still open.
     channel, and `wslc run` exposes `--gpus` and no device flag at all, so
     there is no way to even ask for one. See TODONT.
   - **Native Linux `/dev/dri` is still untested**, and it is what #31 asks
-    for. Neither limitation found here predicts the native answer.
+    for. Neither limitation found here predicts the native answer. A live-USB
+    run book is ready at `docs/dev/linux-native-gpu-test.md` — a USB is
+    prepared for the B60 box, and the 285K can be made dual-boot if that
+    turns out to be the better host.
   - Why models needing the large-allocation hint load ~3x slower (E2B 11.5s
     native vs 33-42.5s in-container; SmolLM3, which needs no hint, is at
     parity).

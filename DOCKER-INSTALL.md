@@ -602,6 +602,9 @@ every check short of reading the output says this model is fine.
   Both limitations found here (the 1 GiB cap, the stock image's driver age)
   are artefacts of the WSL path or of one vendor image; neither predicts the
   native answer. No claim either way.
+  → **Run book: `docs/dev/linux-native-gpu-test.md`.** Self-contained, for a
+  live USB on the B60 box; no install, no repartitioning. Step 2 alone (two
+  integers) settles the 1 GiB question.
 - ~~Track B / B2~~ — **answered 2026-08-24, and the answer is no.** The
   285K is now on WSL 2.9.8.0 with the WSL Containers preview; there is no
   NPU device node in either channel and `wslc run` has no device-passthrough
