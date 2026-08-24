@@ -3,6 +3,14 @@
 install-windows.bat text eol=crlf
 install-linux.sh text eol=lf
 
+# Same rule, same reason: these are read by Linux tooling. A CRLF working
+# copy on Windows puts  into RUN continuations and into the ignore
+# patterns, which fails at build time on someone else's machine.
+Dockerfile text eol=lf
+.dockerignore text eol=lf
+docker-compose*.yml text eol=lf
+requirements-container.txt text eol=lf
+
 # Keep dev-only directories out of `git archive` (the release ZIP).
 .claude export-ignore
 .github export-ignore
