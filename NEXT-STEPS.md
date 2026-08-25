@@ -103,7 +103,20 @@ the docs — this file is only what's still open.
   testing: setting `OV_GPU_SHAPE_PREDICTOR_SETTINGS` (a RELEASE_INTERNAL
   option) crashes pipeline construction — `ShapePredictor::Settings` has no
   string parser ("Bad as from std::string"), so the env knob is unusable
-  and a bad value kills the load. Weight staging through host/shared memory
+  and a bad value kills the load.
+
+  **To file as its own ticket, deliberately deferred (2026-08-25.)** It is
+  independent of the logits-allocation bug above, and now more orphaned than
+  before: ShapePredictor is no longer implicated in that bug at all, so this
+  will never get attention buried as a "bonus" in a ticket about something
+  else. Holding it until #37501 is resolved rather than filing now — two open
+  tickets from us on the same subsystem, one of which we already had to
+  retract a theory in, is a good way to get both triaged slowly. When filing:
+  minimal repro (set the env var, construct any pipeline, it dies), state
+  plainly that the ask is either a string parser for
+  `ShapePredictor::Settings` or for the option to reject bad input without
+  killing construction. Re-run the repro first — it has not been retested
+  since 2026-08-18. Weight staging through host/shared memory
   is by design (two-stage allocation, memory_allocation_gpu_plugin.md); no
   public knob for device-direct loading; `usm_policy`/`disable_usm` are
   debug-caps-only. Windows "shared GPU memory" is the WDDM half-of-RAM
