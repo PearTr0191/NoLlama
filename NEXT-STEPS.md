@@ -60,14 +60,46 @@ the docs — this file is only what's still open.
   Raw VLMPipeline (plain, no scheduler_config), Glimmer int4 on the B60:
   first ~33k-token generate fails with a USM Device allocation error;
   identical retry succeeds. 100% reproducible, with or without short
-  generates first. Both observed failure sizes divide by exactly 1.1:
-  16,049,884,928 = 14,590,804,480 × 1.1 and 16,031,296,512 =
-  14,573,905,920 × 1.1 — the GPU plugin's ShapePredictor "percentage
-  preallocation" (`buffers_preallocation_ratio = 1.1`, options.inl:61)
-  applied to a huge dynamic buffer (full-sequence logits or attention
-  scratch). The CB path avoids it because chunked prefill never allocates
-  the full-sequence buffer — consistent with scheduler_config being the
-  workaround AND with CB's slower cold prefill. Bonus bug found while
+  generates first.
+
+  **Diagnosed 2026-08-25, and it corrects what we filed.** The buffer is a
+  **full-sequence logits allocation**: every failure size decodes exactly as
+  `vocab_size × sequence_length × dtype_width`, no remainder, for all four
+  numbers we have. Glimmer's `vocab_size` is 202,048 and the repro prompt is
+  39,658 tokens:
+
+  | run | requested | decodes as | vs prompt |
+  |---|---|---|---|
+  | 2026-08-25 control | 32,095,728,896 | 202,048 × 39,713 × 4 | +55 |
+  | 2026-08-25 warmed | 32,056,935,680 | 202,048 × 39,665 × 4 | +7 |
+  | 2026-08-18 #1 | 16,049,884,928 | 202,048 × 39,718 × 2 | +60 |
+  | 2026-08-18 #2 | 16,031,296,512 | 202,048 × 39,672 × 2 | +14 |
+
+  Generation needs the **last position only** — 202,048 × 4 = 808 KB. The
+  allocation is ~39,700x that and scales with prompt length. The whole KV
+  cache for the same prompt is 1.97 GB, so the logits buffer is 16x the KV.
+
+  **The ×1.1 reading we filed was wrong — retracted upstream.**
+  `202,048 = 11 × 18,368`, so *every* allocation of the form
+  `vocab_size × n × width` for this model divides by 1.1 exactly, for any n.
+  We pattern-matched a property of the vocabulary onto
+  `buffers_preallocation_ratio` and sent Intel down that path. Worth
+  remembering as a method failure, not just a wrong answer: two data points
+  fitting a ratio is not evidence when the ratio's factors sit in the
+  operands.
+
+  Unexplained: the August sizes decode at width 2 and today's at width 4 on
+  the same nominal build — the buffer appears to have gone fp16 → fp32 and
+  doubled, which moved the failure from "16 GB alloc fails" to "32 GB exceeds
+  the 25,055,051,776 device maximum outright". Only known change on the box
+  is the Windows Intel graphics driver.
+
+  Intel's suggested workaround (a dummy short generate first) **does not
+  work** — measured 2026-08-25, fails identically. It does tighten the
+  predicted length from prompt+55 to prompt+7, i.e. 0.12% against a 7.0 GB
+  gap. The CB path avoids the whole thing because chunked prefill never
+  allocates the full-sequence buffer — consistent with scheduler_config being
+  the workaround AND with CB's slower cold prefill. Bonus bug found while
   testing: setting `OV_GPU_SHAPE_PREDICTOR_SETTINGS` (a RELEASE_INTERNAL
   option) crashes pipeline construction — `ShapePredictor::Settings` has no
   string parser ("Bad as from std::string"), so the env knob is unusable
