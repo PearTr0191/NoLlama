@@ -171,6 +171,53 @@ const eq = (name, actual, expected) => actual === expected ? pass++ : (fail++, c
   const align = mdEscapeAndRender('| a | b |\n|:--|--:|\n| 1 | 2 |');
   has('align colons header', align, '<th>a</th><th>b</th>');
   has('align colons body', align, '<td>1</td><td>2</td>');
+
+  // splitTableRow robustness: a pipe inside a cell's content must NOT be
+  // treated as a column delimiter. Otherwise benchmark tables of SQL or
+  // filter expressions split on every | and render garbage.
+  const sqlCell = mdEscapeAndRender('| sql |\n|---|\n| `select a | b from t` |');
+  has('pipe in code span stays in one cell', sqlCell, '<td><code>select a | b from t</code></td>');
+
+  const linkCell = mdEscapeAndRender('| m |\n|---|\n| [x](http://a.com/p|q) |');
+  has('pipe in link URL stays in one cell', linkCell, '<td><a href="http://a.com/p|q">x</a></td>');
+
+  // consecutive tables separated by a blank line render as two tables
+  const twoTables = mdEscapeAndRender('| a |\n|---|\n| 1 |\n\n| b |\n|---|\n| 2 |');
+  eq('two tables with blank line', (twoTables.match(/<table>/g) || []).length, 2);
+
+  // streaming: a table assembles from partial tokens. The streaming path
+  // calls mdEscapeAndRender on the accumulated text, so exercising the
+  // block pass on partial inputs covers it.
+  notHas('partial header only no table',
+    mdEscapeAndRender('| Model | tok/s |'), '<table>');
+  has('partial with separator forms table',
+    mdEscapeAndRender('| Model | tok/s |\n|---|---|'), '<table>');
+  has('full table after body row arrives',
+    mdEscapeAndRender('| Model | tok/s |\n|---|---|\n| Qwen | 12 |'),
+    '<tr><td>Qwen</td><td>12</td></tr>');
+
+  // blockquote, then blank line, then table
+  has('blockquote before table',
+    mdEscapeAndRender('> intro\n\n| a |\n|---|\n| 1 |'),
+    '<blockquote>intro</blockquote>');
+
+  // img alt attribute injection in a cell: the inner " must be neutralised
+  // so the alt attribute remains closed. safeUrl + escapeAttr handle this.
+  const imgCell = mdEscapeAndRender('| Bad |\n|---|\n| ![x" onerror="y](a.png) |');
+  notHas('img alt injection neutralised', imgCell, ' onerror="y"');
+  has('img alt injection safe &quot;', imgCell, '&quot; onerror=&quot;y');
+
+  // ragged table: header has more cells than body row -- browsers handle
+  // this, the renderer must not crash or pad cells.
+  const ragged = mdEscapeAndRender('| a | b | c |\n|---|---|---|\n| 1 | 2 |');
+  eq('ragged 3 th', (ragged.match(/<th>/g) || []).length, 3);
+  eq('ragged 2 td', (ragged.match(/<td>/g) || []).length, 2);
+
+  // large table does not crash and produces the expected row count
+  let bigBody = '| col |\n|---|\n';
+  for (let i = 0; i < 200; i++) bigBody += `| row${i} |\n`;
+  const big = mdEscapeAndRender(bigBody);
+  eq('large table row count', (big.match(/<tr>/g) || []).length, 201);
 })();
 
 // --- regression: the original creator's known-good cases ---

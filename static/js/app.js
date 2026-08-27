@@ -338,6 +338,7 @@ async function justAnswerMe(event) {
         setGenerating(false);
         abortController = null;
         input.focus();
+        updateHistoryWarning();
     }
 }
 window.justAnswerMe = justAnswerMe;
@@ -576,11 +577,31 @@ function safeUrl(u) {
 
 // Split a `| a | b |` row into trimmed cells. Leading/trailing pipes are
 // dropped; pipes are untouched by escapeHtml so they reach us intact.
+// A bare `s.split('|')` would break on `| select a | b from t |` -- a pipe
+// inside a backtick code span is a literal in the cell, not a column
+// delimiter. Same for `| [x](http://h.com/p|q) |` where the link URL is
+// one cell, not two. Walk the row, only split on `|` when we are outside
+// a `...` code span AND outside a `[...](...)` link/image group, so any
+// cell content that happens to contain `|` round-trips intact.
 function splitTableRow(row) {
     let s = row.trim();
     if (s.startsWith('|')) s = s.slice(1);
     if (s.endsWith('|')) s = s.slice(0, -1);
-    return s.split('|').map(c => c.trim());
+    const cells = [];
+    let cur = '';
+    let inCode = false;
+    let inLink = false;  // inside a `[...](...)` link/image group
+    for (let i = 0; i < s.length; i++) {
+        const ch = s[i];
+        if (ch === '`') { inCode = !inCode; cur += ch; continue; }
+        if (inCode) { cur += ch; continue; }
+        if (ch === '[') { inLink = true; cur += ch; continue; }
+        if (ch === ')' && inLink) { inLink = false; cur += ch; continue; }
+        if (ch === '|' && !inLink) { cells.push(cur.trim()); cur = ''; continue; }
+        cur += ch;
+    }
+    cells.push(cur.trim());
+    return cells;
 }
 
 // A separator row (| --- |, | :---: |, |---|---| ...). Only dashes and
