@@ -478,7 +478,7 @@ function renderMarkdown(text, isStreaming) {
         const thinkContent = thinkMatch[1].trim();
         mainText = thinkMatch[2].trim();
         // Skip empty think blocks (no-think mode sometimes emits empty tags)
-if (thinkContent) {
+        if (thinkContent) {
             thinkHtml = renderThinkingBlock(thinkContent, false, thinkExpanded ? '' : 'collapsed');
         }
     } else if (thinkClose) {
