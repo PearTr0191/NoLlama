@@ -15,6 +15,12 @@ const newChatBtn = document.getElementById('new-chat-btn');
 const temperatureSlider = document.getElementById('temperature');
 const tempValue = document.getElementById('temp-value');
 const noThinkCheckbox = document.getElementById('no-think');
+// The last sentence is Muse Glimmer's native reasoning control (its chat
+// template defers to a system-prompt 'Reasoning strength:' line, default
+// high); other models read it as ordinary prose. Never mention '<think>'
+// here: the model mimics the literal tags into its answer text (observed
+// on Glimmer 2026-08-13).
+const NO_THINK_PROMPT = 'Respond directly and concisely, with no internal reasoning preamble. Reasoning strength: minimal.';
 
 // Temperature slider display
 temperatureSlider.addEventListener('input', () => {
@@ -27,22 +33,44 @@ let thinkExpanded = false; // track think block expand state across re-renders
 let isGenerating = false;
 let abortController = null;
 
-// Send-button doubles as a visible Stop while generating (Escape still works).
+/**
+ * Flip the UI into/out of "generating" mode.
+ *
+ * Why: the send-button doubles as a visible Stop while generating (Escape
+ * still works) — one button, two labels, no extra chrome.
+ */
 function setGenerating(on) {
     isGenerating = on;
     sendBtn.textContent = on ? 'Stop' : 'Send';
     sendBtn.classList.toggle('stop', on);
 }
 
+/**
+ * Stop the current generation: abort our fetch AND tell the server.
+ *
+ * Why both: aborting the fetch only closes our connection — the server keeps
+ * generating into the void (OpenVINO can't see the disconnect mid-stream), so
+ * /v1/cancel asks it to stop via the streamer callback too.
+ */
 function cancelGeneration() {
     if (abortController) abortController.abort();
     fetch('/v1/cancel', { method: 'POST' }).catch(() => {});
 }
 
+/**
+ * True when the user is within 80px of the chat bottom — i.e. following the
+ * conversation rather than reading back. The margin absorbs sub-line scroll
+ * jitter from streaming redraws.
+ */
 function shouldAutoScroll() {
     return chat.scrollHeight - chat.scrollTop - chat.clientHeight < 80;
 }
 
+/**
+ * Scroll the chat to the bottom, but ONLY if the user was already there —
+ * yanking the view down while someone reads an earlier answer is the classic
+ * chat-UI sin.
+ */
 function scrollToBottom() {
     if (shouldAutoScroll()) chat.scrollTop = chat.scrollHeight;
 }
@@ -56,12 +84,15 @@ function scrollToBottom() {
 const STREAM_THRESHOLD = 32; // px from the bottom == "pinned to the stream"
 let streamState = { thinkFull: null, pinned: true, onScroll: null };
 
+/**
+ * (Re)bind the scroll listener to the current .think-full node.
+ *
+ * Why rebinding exists: the node is recreated on every innerHTML redraw
+ * during streaming — detach from the old one, bind to the new one. `pinned`
+ * lives on streamState and is read at redraw time, not captured at the
+ * listener's creation, so it persists correctly across redraws.
+ */
 function attachThinkScroll(thinkFull) {
-    // (Re)bind a scroll listener to the current think-full node. The node is
-    // recreated on every innerHTML redraw during streaming i.e. detach from the
-    // old one and bind to the new one. `pinned` lives on streamState and is
-    // read at redraw time, not captured by the listener closure's creation, so
-    // it persists correctly across redraws.
     if (streamState.onScroll && streamState.thinkFull) {
         streamState.thinkFull.removeEventListener('scroll', streamState.onScroll);
     }
@@ -74,11 +105,17 @@ function attachThinkScroll(thinkFull) {
     thinkFull.addEventListener('scroll', streamState.onScroll, { passive: true });
 }
 
+/**
+ * Redraw the streaming assistant bubble for the accumulated text so far.
+ *
+ * Why the two paths: when a scrollable .think-full already exists, only its
+ * inner content is swapped — the user's scrollTop survives natively, no
+ * element recreation, no manual restore, no fighting the user's wheel.
+ * Pinned re-pins to the tail; freed leaves the position untouched. Only when
+ * no such node exists (or the think block just closed) is the bubble fully
+ * re-rendered.
+ */
 function updateStreamBubble(assistantDiv, fullText) {
-    // A scrollable .think-full already exists so only its inner content is swapped, allowing
-    // to preserve the user's scrollTop natively — no element recreation,
-    // manual restore, thus no fighting the user's wheel. Pinned re-pins to the
-    // tail; freed leaves the position untouched.
     const prev = streamState.thinkFull;
     if (prev) {
         const scratch = document.createElement('div');
@@ -120,8 +157,10 @@ function updateStreamBubble(assistantDiv, fullText) {
     scrollToBottom(); // keep the outer chat at the bottom when viewing the tail
 }
 
-// Keep the surviving .think-block, drop everything else in assistantDiv, then
-// re-append the answer nodes (and just-answer button) from the scratch render.
+/**
+ * Keep the surviving .think-block, drop everything else in assistantDiv, then
+ * re-append the answer nodes (and just-answer button) from the scratch render.
+ */
 function syncAnswerNodes(assistantDiv, scratch) {
     const keepBlock = assistantDiv.querySelector('.think-block');
     Array.from(assistantDiv.children).forEach((c) => { if (c !== keepBlock) c.remove(); });
@@ -130,6 +169,11 @@ function syncAnswerNodes(assistantDiv, scratch) {
     });
 }
 
+/**
+ * Detach the scroll listener and reset to "pinned" for the next stream —
+ * called at stream start AND end so a leftover freed state from the previous
+ * answer can't leave the new one unpinned.
+ */
 function resetStreamState() {
     if (streamState.onScroll && streamState.thinkFull) {
         streamState.thinkFull.removeEventListener('scroll', streamState.onScroll);
@@ -141,6 +185,7 @@ function resetStreamState() {
 
 // --- Init ---
 
+/** Page boot: health + model list, then poll health every 15s. */
 async function init() {
     await checkHealth();
     await loadModels();
@@ -148,6 +193,10 @@ async function init() {
     input.focus();
 }
 
+/**
+ * Update the status dot from /health; a fetch failure shows as
+ * "disconnected" rather than leaving a stale green dot lying.
+ */
 async function checkHealth() {
     try {
         const resp = await fetch('/health');
@@ -160,6 +209,10 @@ async function checkHealth() {
     }
 }
 
+/**
+ * Fill the model picker from /v1/models. Ids stay "name@DEVICE" (that is
+ * what the server routes on); only the label is prettified to "name (DEVICE)".
+ */
 async function loadModels() {
     try {
         const resp = await fetch('/v1/models');
@@ -180,6 +233,14 @@ async function loadModels() {
 
 // --- Request builder ---
 
+/**
+ * Assemble the /v1/chat/completions body from UI state.
+ *
+ * Why the UI-only repetition_penalty 1.1: the web UI is the "does it work"
+ * surface, and a thinking-loop on a slow iGPU reads as "it doesn't"; the
+ * server default stays milder (1.05) for coding agents. The no-think system
+ * prompt replaces any user system message rather than stacking on it.
+ */
 function buildRequestBody(overrides) {
     const temp = temperatureSlider.value / 100;
     const noThink = noThinkCheckbox.checked;
@@ -188,7 +249,7 @@ function buildRequestBody(overrides) {
     if (noThink) {
         // Prepend no-think system prompt
         messages = [
-            { role: 'system', content: 'Respond directly and concisely. Do not use <think> blocks or internal reasoning.' },
+            { role: 'system', content: NO_THINK_PROMPT },
             ...messages.filter(m => m.role !== 'system'),
         ];
     }
@@ -213,6 +274,15 @@ function buildRequestBody(overrides) {
 
 // --- Just answer me, dammit! ---
 
+/**
+ * "Just answer me, dammit!": abort the thinking-heavy generation and re-ask
+ * the same question with the no-think system prompt.
+ *
+ * Why: on slow devices a thinking model can burn its whole token budget in
+ * <think> — this is the escape hatch, offered once the block passes 8 lines.
+ * The aborted assistant turn is never pushed to history (only completed
+ * replies are), so the retry sees a clean transcript.
+ */
 async function justAnswerMe(event) {
     event.stopPropagation();
 
@@ -264,7 +334,7 @@ async function justAnswerMe(event) {
             signal: abortController.signal,
             body: JSON.stringify(buildRequestBody({
                 messages: [
-                    { role: 'system', content: 'Respond directly and concisely. Do not use <think> blocks or internal reasoning.' },
+                    { role: 'system', content: NO_THINK_PROMPT },
                     ...chatHistory.filter(m => m.role !== 'system'),
                 ],
             })),
@@ -345,6 +415,11 @@ window.justAnswerMe = justAnswerMe;
 
 // --- Chat ---
 
+/**
+ * Append a chat bubble. String content goes through renderMarkdown; anything
+ * else is trusted, pre-built HTML (callers escape it themselves — see
+ * sendMessage's attached-image path for why that trust exists).
+ */
 function addMessage(role, content, meta) {
     const div = document.createElement('div');
     div.className = `message ${role}`;
@@ -367,6 +442,15 @@ function addMessage(role, content, meta) {
     return div;
 }
 
+/**
+ * Model text -> bubble HTML: split out the <think> block, render both halves
+ * as markdown.
+ *
+ * The four think states below (paired tags / orphan closer / still-open /
+ * tag-chars-arriving) exist because chat templates differ in WHERE the
+ * opening tag lives — some pre-seed it into the prompt so only the closer is
+ * ever generated. Each state's comment carries its evidence.
+ */
 function renderMarkdown(text, isStreaming) {
     // Handle <think>...</think> blocks BEFORE escaping HTML
     // These are raw model output tags, not user HTML
@@ -375,15 +459,36 @@ function renderMarkdown(text, isStreaming) {
 
     // Complete: <think>...</think> followed by the actual answer
     let thinkMatch = text.match(/^<think>([\s\S]*?)<\/think>\s*([\s\S]*)$/);
+    // Orphan closing tag: a CLOSING </think> with no opening one. This is not
+    // a model quirk — the chat template pre-seeds the opening tag into the
+    // PROMPT as the assistant's generation prefix, so it never appears in the
+    // generated text. Qwen3.8's template ends with:
+    //     {{- '<|im_start|>assistant\n' }}  ... {{- '<think>\n' }}
+    // The model therefore starts generating already inside the block and only
+    // ever emits the closer. Both Qwen3.8 and SmolLM3 reason fully here; the
+    // reasoning is real, it was just being rendered as the answer along with a
+    // literal "</think>". Observed on the B60, 2026-08-15.
+    let thinkClose = !thinkMatch && text.match(/^([\s\S]*?)<\/think>\s*([\s\S]*)$/);
     // Partial: <think> started but no closing tag yet (streaming)
-    let thinkOpen = !thinkMatch && text.match(/^<think>([\s\S]*)$/);
+    let thinkOpen = !thinkMatch && !thinkClose && text.match(/^<think>([\s\S]*)$/);
     // Very early: just the opening tag arriving character by character
-    let thinkStarting = !thinkMatch && !thinkOpen && /^<(?:t(?:h(?:i(?:n(?:k)?)?)?)?)?$/.test(text.trim());
+    let thinkStarting = !thinkMatch && !thinkClose && !thinkOpen && /^<(?:t(?:h(?:i(?:n(?:k)?)?)?)?)?$/.test(text.trim());
 
     if (thinkMatch) {
         const thinkContent = thinkMatch[1].trim();
         mainText = thinkMatch[2].trim();
         // Skip empty think blocks (no-think mode sometimes emits empty tags)
+if (thinkContent) {
+            thinkHtml = renderThinkingBlock(thinkContent, false, thinkExpanded ? '' : 'collapsed');
+        }
+    } else if (thinkClose) {
+        // Same handling as the paired case. Note this only settles once the
+        // closer arrives: mid-stream we cannot tell a pre-seeded thinker from
+        // a model that simply never thinks, so the text streams as the answer
+        // and snaps into a collapsed block at <think>. That is the safe way
+        // round — the alternative hides a non-thinking model's whole reply.
+        const thinkContent = thinkClose[1].trim();
+        mainText = thinkClose[2].trim();
         if (thinkContent) {
             thinkHtml = renderThinkingBlock(thinkContent, false, thinkExpanded ? '' : 'collapsed');
         }
@@ -424,10 +529,12 @@ function renderMarkdown(text, isStreaming) {
     return thinkHtml + mdEscapeAndRender(mainText);
 }
 
-// Renders the inner HTML for a thinking block's full/preview content.
-// Uses the same markdown renderer as the main answer so markdown syntax
-// inside thinking (headers, lists, bold, code blocks) is rendered, not
-// leaked as raw text.
+/**
+ * Renders the inner HTML for a thinking block's full/preview content.
+ * Uses the same markdown renderer as the main answer so markdown syntax
+ * inside thinking (headers, lists, bold, code blocks) is rendered, not
+ * leaked as raw text. Preview = the last 3 lines (the live tail).
+ */
 function renderThinkingBlock(content, streaming, extraClass) {
     const full = mdEscapeAndRender(content);
     const preview = mdEscapeAndRender(content.split('\n').slice(-3).join('\n'));
@@ -612,12 +719,166 @@ function isTableSeparator(line) {
     return s.slice(1, -1).split('|').every(c => /^\s*:?-+:?\s*$/.test(c));
 }
 
+/**
+ * Renders the inner HTML for a thinking block's full/preview content.
+ * Uses the same markdown renderer as the main answer so markdown syntax
+ * inside thinking (headers, lists, bold, code blocks) is rendered, not
+ * leaked as raw text. Preview = the last 3 lines (the live tail).
+ */
+function renderThinkingBlock(content, streaming, extraClass) {
+    const full = mdEscapeAndRender(content);
+    const preview = mdEscapeAndRender(content.split('\n').slice(-3).join('\n'));
+    const cls = streaming ? 'streaming ' + extraClass : extraClass;
+    return `<div class="think-block ${cls}" data-think-toggle>
+        <div class="think-header">Thinking... <span class="think-toggle">(click to expand)</span></div>
+        <div class="think-full">${full}</div>
+        <div class="think-preview">${preview}</div>
+    </div>`;
+}
+
+// ---------------------------------------------------------------------------
+// Markdown rendering (self-contained, no dependencies)
+// ---------------------------------------------------------------------------
+/**
+ * Escaped-markdown renderer (hand-rolled, no library — PR #23).
+ *
+ * Order-of-operations:
+ *   1. escapeHtml the whole input to guarantee raw model HTML can never execute.
+ *      All passes below operate on the escaped text.
+ *   2. Pull fenced code blocks into protected placeholders so the inline
+ *      bold/italic/code passes below never touch code content (the old
+ *      renderer mangled `**x**` and `*x*` inside code blocks).
+ *   3. Block passes, line by line: code blocks, headers, blockquotes, lists,
+ *      paragraphs. Each line's text goes through mdInline exactly ONCE, inside
+ *      the block pass — running it on the whole text first and again per line
+ *      corrupts _ and * inside href/src attributes generated by the first
+ *      pass, and lets *...* match across newlines, eating `* ` bullet lists.
+ *   4. Inline passes (mdInline): inline code, images, links (scheme-checked),
+ *      bold, italic — with code spans and attribute values protected.
+ */
+function mdEscapeAndRender(text) {
+    if (!text) return '';
+    let html = escapeHtml(text);
+    const codeBlocks = [];
+    html = html.replace(/```([a-zA-Z0-9_-]*)\n([\s\S]*?)```/g, (_, lang, code) => {
+        const i = codeBlocks.length;
+        codeBlocks.push({ lang, code: code.replace(/\n$/, '') });
+        return `\u0000CODE${i}\u0000`;
+    });
+    const lines = html.split('\n');
+    const out = [];
+    let inList = false, inBlockquote = false, inParagraph = false;
+    /** Close the open <p>/<ol|ul>/<blockquote> if any — each block pass calls
+        the ones its element cannot nest inside. */
+    const closePara = () => { if (inParagraph) { out.push('</p>'); inParagraph = false; } };
+    /** See closePara. */
+    const closeList = () => { if (inList) { out.push(`</${inList}>`); inList = false; } };
+    /** See closePara. */
+    const closeBlockquote = () => { if (inBlockquote) { out.push('</blockquote>'); inBlockquote = false; } };
+    for (let i = 0; i < lines.length; i++) {
+        const trimmed = lines[i].trim();
+        const codeMatch = trimmed.match(/^(\u0000CODE\d+\u0000)$/);
+        // Guard: literal NUL+CODEn+NUL in model text has no matching block --
+        // fall through to the paragraph path instead of crashing on blk.lang.
+        const codeBlk = codeMatch && codeBlocks[+codeMatch[1].match(/\d+/)];
+        if (codeBlk) {
+            closePara(); closeList(); closeBlockquote();
+            out.push(`<pre><code class="language-${escapeHtml(codeBlk.lang || '')}">${codeBlk.code}</code><button class="copy-btn" onclick="copyCode(this)">copy</button></pre>`);
+            continue;
+        }
+        const h = trimmed.match(/^(#{1,6})\s+(.*)$/);
+        if (h) { closePara(); closeList(); closeBlockquote(); out.push(`<h${h[1].length}>${mdInline(h[2])}</h${h[1].length}>`); continue; }
+        // Input is already HTML-escaped, so markdown "> quote" arrives here
+        // as "&gt; quote" -- match the entity, not the raw >.
+        const bq = trimmed.match(/^&gt; ?(.*)$/);
+        if (bq) { closePara(); closeList(); if (!inBlockquote) { closeBlockquote(); out.push('<blockquote>'); inBlockquote = true; } out.push(mdInline(bq[1])); continue; }
+        closeBlockquote();
+        const ol = trimmed.match(/^(\d+)\. (.*)$/);
+        const ul = trimmed.match(/^[-*+] (.*)$/);
+        if (ol || ul) {
+            closePara();
+            const listType = ol ? 'ol' : 'ul';
+            if (inList !== listType) { closeList(); out.push(`<${listType}>`); inList = listType; }
+            out.push(`<li>${mdInline((ol ? ol[2] : ul[1]) || '')}</li>`);
+            continue;
+        }
+        closeList();
+        if (trimmed === '') { closePara(); closeBlockquote(); continue; }
+        if (!inParagraph) { out.push('<p>'); inParagraph = true; } else { out.push(' '); }
+        out.push(mdInline(lines[i]));
+    }
+    closePara(); closeList(); closeBlockquote();
+    return out.join('').replace(/\u0000CODE\d+\u0000/g, m => {
+        const blk = codeBlocks[+(m.match(/\d+/) || [0])[0]];
+        if (!blk) return ''; // literal NUL junk in model text, not ours
+        return `<pre><code class="language-${escapeHtml(blk.lang || '')}">${blk.code}</code><button class="copy-btn" onclick="copyCode(this)">copy</button></pre>`;
+    });
+}
+
+/**
+ * Apply inline passes (on already-escaped text) to a single LINE of text.
+ * Called exactly once per line by the block pass in mdEscapeAndRender — never
+ * run it twice on the same text: a second pass corrupts _ and * inside the
+ * href/src attributes the first pass generated.
+ * Code spans and generated tags are pulled into placeholders so the emphasis
+ * passes can't touch code content (`snake_case`) or URLs (...model_id...).
+ */
+function mdInline(str) {
+    const guarded = [];
+    /** Park generated HTML behind a NUL placeholder the emphasis regexes can't touch. */
+    const guard = (html) => { guarded.push(html); return `\u0000G${guarded.length - 1}\u0000`; };
+    let s = str;
+    s = s.replace(/`([^`\n]+)`/g, (_, c) => guard(`<code>${c}</code>`));
+    s = s.replace(/!\[([^\]\n]*)\]\(([^)\n]+)\)/g, (m, a, u) => {
+        const url = safeUrl(u);
+        return url ? guard(`<img alt="${escapeAttr(a)}" src="${url}">`) : m;
+    });
+    s = s.replace(/\[([^\]\n]+)\]\(([^)\n]+)\)/g, (m, l, u) => {
+        const url = safeUrl(u);
+        // Only the opening tag is guarded — emphasis inside link text still works.
+        return url ? guard(`<a href="${url}">`) + l + '</a>' : m;
+    });
+    s = s.replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>');
+    s = s.replace(/__([^_\n]+)__/g, '<strong>$1</strong>');
+    s = s.replace(/\*([^*\n]+)\*/g, '<em>$1</em>');
+    s = s.replace(/_([^_\n]+)_/g, '<em>$1</em>');
+    return s.replace(/\u0000G(\d+)\u0000/g, (m, i) => guarded[+i] !== undefined ? guarded[+i] : '');
+}
+
+/**
+ * escapeHtml (textContent -> innerHTML) escapes & < > but NOT quotes. That is
+ * fine for text nodes, but attribute values built from model output must have
+ * quotes escaped too, or `![x" onerror=...](y)` breaks out of the attribute.
+ */
+function escapeAttr(s) {
+    return s.replace(/"/g, '&quot;');
+}
+
+/**
+ * Allow only URL schemes that cannot execute script (plus scheme-less
+ * relative/fragment URLs). javascript:, data:, vbscript: etc. are rejected;
+ * the caller then leaves the markdown as plain, already-escaped text.
+ * Why escapeHtml is not enough: every character in a javascript: URI is
+ * escape-neutral, so the value survives escaping intact and executes on click.
+ */
+function safeUrl(u) {
+    const url = u.trim();
+    const scheme = url.match(/^[a-zA-Z][a-zA-Z0-9+.-]*:/);
+    if (scheme && !/^(https?|mailto):$/i.test(scheme[0])) return null;
+    return escapeAttr(url);
+}
+
+/**
+ * HTML-escape via the DOM (textContent -> innerHTML): & < > only — quote
+ * escaping for attributes is escapeAttr's job.
+ */
 function escapeHtml(text) {
     const div = document.createElement('div');
     div.textContent = text;
     return div.innerHTML;
 }
 
+/** Copy a code block's text; button label doubles as the confirmation. */
 function copyCode(btn) {
     const code = btn.parentElement.querySelector('code').textContent;
     navigator.clipboard.writeText(code);
@@ -632,6 +893,15 @@ window.renderMarkdown = renderMarkdown;
 window.updateStreamBubble = updateStreamBubble;
 window.resetStreamState = resetStreamState;
 
+/**
+ * Send the composed turn and stream the reply into a new assistant bubble.
+ *
+ * Contract with history: the user turn is pushed BEFORE the request but
+ * removed again (dropUserMsg) on any failure the model never saw — a stale
+ * user turn silently prepended to every later request reads as a corrupted
+ * transcript (observed on Glimmer: it answers the wrong turn). A deliberate
+ * cancel keeps it: justAnswerMe's retry needs it there.
+ */
 async function sendMessage() {
     const text = input.value.trim();
     if (!text && !attachedImage) return;
@@ -659,8 +929,17 @@ async function sendMessage() {
     // src as visible text.
     const userDiv = addMessage('user', '');
     userDiv.innerHTML = displayHtml.replace(/\n/g, '<br>');
-    chatHistory.push({ role: 'user', content: userContent });
+    const userMsg = { role: 'user', content: userContent };
+    chatHistory.push(userMsg);
     updateHistoryWarning();
+    /** A send the model never saw (server not ready, network error) must not
+     * stay in history: it becomes a stale user turn silently prepended to
+     * every later request — two consecutive user messages read as a corrupted
+     * transcript to the model (observed on Glimmer: it answers the wrong turn). */
+    const dropUserMsg = () => {
+        const i = chatHistory.lastIndexOf(userMsg);
+        if (i >= 0) chatHistory.splice(i, 1);
+    };
 
     // Clear input
     input.value = '';
@@ -703,6 +982,7 @@ async function sendMessage() {
         const model = resp.headers.get('X-Model') || '';
 
         if (!resp.ok) {
+            dropUserMsg();
             const err = await resp.json();
             assistantDiv.innerHTML = `<span style="color:var(--error)">${escapeHtml(err.error?.message || 'Error')}</span>`;
             return;
@@ -774,8 +1054,11 @@ async function sendMessage() {
         }
     } catch (err) {
         if (err.name === 'AbortError') {
+            // Deliberate cancel: keep the user message — justAnswerMe's retry
+            // (and a manual re-ask) still needs it in history.
             assistantDiv.innerHTML += '<br><span style="color:var(--text-dim)">[cancelled]</span>';
         } else {
+            dropUserMsg();
             assistantDiv.innerHTML = `<span style="color:var(--error)">${escapeHtml(err.message)}</span>`;
         }
     } finally {
@@ -848,6 +1131,10 @@ function initHistoryWarning() {
     host.insertBefore(warn, host.firstChild);
 }
 
+/**
+ * Clear history + chat pane (Ctrl+N). Also the user's tool for keeping long
+ * sessions under the NPU's MAX_PROMPT_LEN — history is unbounded by design.
+ */
 function newChat() {
     chatHistory = [];
     chat.innerHTML = '';
@@ -857,6 +1144,10 @@ function newChat() {
 
 // --- Image handling ---
 
+/**
+ * Stage an image (file picker, paste, or drop) as a base64 data URI for the
+ * next send; the focus hand-off below is the why of the last line.
+ */
 function attachImage(file) {
     if (!file || !file.type.startsWith('image/')) return;
     const reader = new FileReader();
@@ -872,6 +1163,7 @@ function attachImage(file) {
     reader.readAsDataURL(file);
 }
 
+/** Drop the staged image and hide its preview. */
 function clearImage() {
     attachedImage = null;
     previewImg.src = '';

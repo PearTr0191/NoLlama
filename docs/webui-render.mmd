@@ -1,0 +1,69 @@
+%% Web UI streaming render: SSE loop, think-block states, XSS layering, pinned scroll.
+%% Drawn 2026-08-19 from static/js/app.js @ 85e796f.
+%% Legend: solid = normal path, dashed = edge/abort paths,
+%%         ALL-CAPS nodes = prose annotations.
+%% Palette: route (blue) = event/state handling, gen (green) = rendering,
+%%          client (yellow) = user-visible, warn (orange) = annotations.
+%% covers: static/js/app.js:sendMessage,justAnswerMe,updateStreamBubble,attachThinkScroll,syncAnswerNodes,resetStreamState,renderMarkdown,renderThinkingBlock,mdEscapeAndRender,mdInline,escapeHtml,escapeAttr,safeUrl,buildRequestBody,addMessage
+flowchart TB
+  sendMessage["sendMessage<br/>push user turn, POST /v1/chat/completions,<br/>read SSE; dropUserMsg on failure the<br/>model never saw"]
+  justAnswerMe["justAnswerMe<br/>abort + /v1/cancel, retry last user turn<br/>with NO_THINK_PROMPT"]
+  buildRequestBody["buildRequestBody<br/>temp slider, no-think system prompt,<br/>repetition_penalty 1.1 (UI-only)"]
+
+  sendMessage --> buildRequestBody
+  justAnswerMe --> buildRequestBody
+  sendMessage --> sse["SSE read loop<br/>split on newline, keep partial line,<br/>accumulate fullText"]
+  sse --> updateStreamBubble
+
+  updateStreamBubble{"updateStreamBubble<br/>does a .think-full node exist?"}
+  updateStreamBubble -->|"yes: swap innerHTML of the SAME
+  element - scrollTop survives natively"| syncAnswerNodes["syncAnswerNodes<br/>keep the live think-block, re-append<br/>answer nodes from the scratch render"]
+  updateStreamBubble -->|"no: full re-render, then"| attachThinkScroll["attachThinkScroll<br/>rebind scroll listener to the<br/>recreated node; 'pinned' lives on<br/>streamState, not in the closure"]
+  syncAnswerNodes -->|"pinned: re-pin to tail;<br/>freed: leave position"| renderMarkdown
+  attachThinkScroll --> renderMarkdown
+  sse -.->|"stream done"| finalRender["renderMarkdown(fullText, false)<br/>collapses the think block;<br/>resetStreamState"]
+
+  renderMarkdown{"renderMarkdown<br/>think-block state"}
+  renderMarkdown -->|"thinkMatch: paired tags"| renderThinkingBlock
+  renderMarkdown -->|"thinkClose: ORPHAN closer -
+  template pre-seeded the opener into
+  the prompt (Qwen3.8, SmolLM3)"| renderThinkingBlock
+  renderMarkdown -->|"thinkOpen: still thinking, live tail;
+  more than 8 lines adds the
+  just-answer button"| renderThinkingBlock
+  renderMarkdown -->|"thinkStarting: partial tag chars"| renderThinkingBlock
+  renderMarkdown --> mdEscapeAndRender
+
+  renderThinkingBlock["renderThinkingBlock<br/>full + 3-line preview, both through<br/>the same markdown renderer"] --> mdEscapeAndRender
+
+  mdEscapeAndRender["mdEscapeAndRender<br/>1 escapeHtml EVERYTHING first<br/>2 fence code blocks into placeholders<br/>3 block passes line by line<br/>4 mdInline exactly ONCE per line"]
+  mdEscapeAndRender --> mdInline["mdInline<br/>code spans + generated tags guarded,<br/>then images/links/bold/italic"]
+  mdInline --> safeUrl["safeUrl: scheme whitelist http/https/mailto<br/>escapeAttr: quotes in attribute values"]
+
+  XSS["XSS LAYERING, from PR 23 review: escapeHtml alone does NOT
+  neutralize a javascript: URI (every char is escape-neutral), and
+  quotes must be escaped in ATTRIBUTES or alt-text breaks out of them.
+  Hence safeUrl + escapeAttr on every generated attribute, never
+  escapeHtml alone."]
+  safeUrl -.-> XSS
+
+  ONCE["mdInline RUNS ONCE PER LINE, inside the block pass. Running it
+  on the whole text and again per line corrupts _ and * inside the
+  href/src attributes the first pass generated, and lets *...* match
+  across newlines, eating bullet lists."]
+  mdInline -.-> ONCE
+
+  SETTLE["The orphan-closer case only settles when the closer arrives:
+  mid-stream a pre-seeded thinker and a model that simply never thinks
+  are indistinguishable, so text streams as the answer and snaps into a
+  collapsed block at /think. The safe way round - the alternative hides
+  a non-thinking model's whole reply."]
+  renderMarkdown -.-> SETTLE
+
+  classDef route fill:#e6f0ff,stroke:#0066cc,color:#000
+  classDef gen fill:#e6ffe6,stroke:#00b300,color:#000
+  classDef client fill:#ffffcc,stroke:#b3b300,color:#000
+  classDef warn fill:#fec,stroke:#a60,color:#000
+  class sendMessage,justAnswerMe,buildRequestBody,sse,updateStreamBubble,attachThinkScroll,syncAnswerNodes route
+  class renderMarkdown,renderThinkingBlock,mdEscapeAndRender,mdInline,safeUrl,finalRender gen
+  class XSS,ONCE,SETTLE warn

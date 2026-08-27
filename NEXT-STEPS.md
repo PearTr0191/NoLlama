@@ -1,111 +1,202 @@
-# NEXT STEPS (2026-08-06/07, OpenVINO 2026.3 testing session)
+# Next steps
 
-## 2026-08-07 HEADLINE — model-bigger-than-RAM works on CPU
+State after the 2026-08-18 merge. Anything settled lives in README, TODONT or
+the docs — this file is only what's still open.
 
-Qwen3-Coder-Next int8 (74.4 GB, Dmitriy's HF upload, integrity verified
-here) on the 64 GB 285K desktop, plain CPU, no flags: loads in ~75-85 s,
-**steady-state 8.8-11.5 tok/s depending on OS page-cache warmth** (cold
-cache after eviction → 8.8; warm after download → 11.5), resident
-stabilizes at ~29-35 GB (committed 78).
-Only the hot experts (10 of 512 active/token) stay in RAM; cold experts
-page from SSD. The A3B access pattern makes >RAM models viable on CPU —
-faster than the laptop's GPU-offload on a model HALF the size. This
-supersedes the 08-06 working-set-cap caveat: real scarcity with real
-access patterns behaves BETTER than the artificial cap suggested.
-Full-day device matrix (same-family MoE): desktop CPU 23.7 (30B, fits) /
-11.5 (74B, doesn't fit); laptop CPU 9.1 (30B); laptop GPU offload 25.3
-(30B ratio 30); non-XMX iGPU: nothing.
+## Open
 
-## EVENING RESOLUTION — offload CONFIRMED on Arc 140V (laptop)
+- **VLM slots are agent-grade (merged as PR #30 + the prewarm commit).**
+  Three changes, all verified end-to-end 2026-08-18:
 
-Qwen3-30B-A3B int4 runs in **2.35 GB resident** at ratio 90 (2.5 tok/s);
-LFM2-8B 4.10→0.70 GB. Old IRs fuse fine on XMX — vintage never mattered,
-only hardware. Shipped same evening: `--offload-ratio` flag (25541ae),
-loop defenses + UI stop button (f2131dd), six models published to HF
-(aweussom/: SmolLM3 ×2, LFM2-1.2B, LFM2.5-1.2B, LFM2-8B-A1B, Qwen2.5-VL-3B),
-registry updated, #19 updated with measured numbers.
+  0. **Prewarm on VLM slots** (followed the PR straight onto main): capture
+     now happens on the VLM paths of both API surfaces, and the startup
+     prefill replays through `parse_messages`' flattening so the cached
+     token prefix matches real requests. Measured Glimmer/B60 through the
+     network API: first turn after a restart 12.4s → **0.65s** TTFT
+     (startup prewarm cost 12.1s, paid before the port answers requests).
+     Slots whose runtime fell back to the plain pipeline zero `kv_pool_gb`
+     at load, so prewarm skips them rather than burning a 30B prefill for
+     nothing (this also makes `/health` honest about a dead cache).
 
-Ratio sweep, Qwen3-30B on 140V — STEADY-STATE (2026-08-07 correction; the
-08-06 single-shot numbers were cold-LRU, 2-5× too low): 30 → 10.79 GB @
-**25.3 tok/s (interactive!)**; 50 → 8.05 GB @ 22.1; 90 → 2.35 GB @ 5.1.
-Reframed: offload at moderate ratios IS interactive on XMX laptops.
-LFM2-8B resident on 140V: 86.8 tok/s (earlier 197/645 were a token-count
-bug — model EOS'd at 4 tokens, script assumed 64).
+  1. **Tool calling on VLM slots** (both API surfaces; buffered like LLM
+     tool turns; images may ride along with tools). Qwen3.5-4B on the 140V
+     and Glimmer on the B60 both return structured
+     `get_weather({"city":"Oslo"})` with `finish_reason=tool_calls`;
+     Glimmer's reasoning stays in `<think>` with no channel leak
+     (`_AtemPlainFilter` also closes the think block at
+     `<atem:function_calls>` so the tool XML reaches `parse_tool_calls`).
+     This un-does the one regression the GenAI reroute had — Glimmer agent
+     use no longer wants `--backend optimum`.
+  2. **Prefix caching on VLM slots.** VLMPipeline honors `scheduler_config`
+     — the long-standing "CB backend is LLM-only" belief was stale. Verified
+     on 2026.3 *release* (140V, ~9k-token prefix 21.7s→3.9s TTFT) and the
+     2026.4 nightly (B60/Glimmer, 33k-token prefix 53.7s→1.4s through
+     NoLlama's serving path). Runtimes that reject the property fall back to
+     the plain pipeline with a log line, like the LLM branch.
 
-VERIFIED 2026-08-07 ~08:46: the CB backend does NOT share the plain-
-pipeline second-generate hang — nollama.py --offload-ratio 30 on the 140V
-served two sequential chat requests (355 tok @ 12.5 tok/s, then 242 tok @
-15.9 tok/s, TTFT 8.0s → 1.9s thanks to prefix caching). The flag is
-production-safe. The plain-pipeline hang remains upstream-repro-worthy
-(only affects scripts using LLMPipeline without scheduler_config).
-Preflight memory warning now acknowledges offload instead of crying wolf.
+  Honest observations from the measurements:
+  - **CB VLM prefill is slower cold**: the same 33k prompt prefilled in
+    ~8.7s on the plain pipeline vs 53.7s under CB (then 1.4s per repeat).
+    Agents win from turn two; one-shot prompts pay more once.
+    `--no-prompt-cache` restores the plain pipeline if that bites.
+  - The plain pipeline **OOM'd on the first 33k-token request** on the B60
+    (16 GB USM allocation failed; the immediate retry succeeded). Under CB
+    the same request completed first try. Unexplained — file upstream if it
+    reproduces.
+  - The "minutes of prefill" worry for agent prompts was wrong for the B60
+    class: 33k tokens prefill in ~9s on the plain pipeline.
 
-LATE-NIGHT ADDENDUM — big MoE on CPU (285K, 2026-08-07 00:xx):
-- Qwen3-30B-A3B int4 on the 285K CPU: **23.7 tok/s, TTFT 458 ms** — fully
-  interactive, 4.4× the laptop GPU offload. On a desktop with RAM ≥ model,
-  plain CPU is the best big-MoE device in the house. (A3B decode only
-  touches ~3B active params/token — bandwidth cost of a small model.)
-- Under an 8 GB hard working-set cap (15.2 GB model): 12.3 tok/s — the A3B
-  access pattern tolerates eviction well. Caveat: pagefile use 17.9 GB
-  shows OpenVINO CPU repacks weights into anonymous memory (no llama.cpp-
-  style file-backed mmap streaming), and with 64 GB physical RAM the
-  evicted pages stayed in the standby list (soft faults) — a genuinely
-  RAM-poor machine would do worse. Scripts: scratchpad cpu_pressure_bench.py.
-- Recommendation matrix now: desktop w/ RAM → CPU; XMX laptop, tight
-  memory → GPU + --offload-ratio; non-XMX iGPU → model must fit.
+- **Intel docs gap — filed upstream as openvino.genai#4343 (2026-08-18).**
+  The VLMPipeline API docs describe its kwargs only as "Device properties"
+  and never mention `scheduler_config`/prefix caching; the GenAI guide shows
+  SchedulerConfig on LLMPipeline only. The feature works (our measurements
+  above, on 2026.3 release AND 2026.4 nightly) — undocumented, not
+  unsupported. The issue also flags the slow cold CB prefill (~54s vs ~9s
+  plain, same prompt/HW) as an observation; if Intel asks, offer the
+  standalone repro. (Track: Intel has historically fixed our reports
+  within a day.)
 
-OPEN: Qwen3.5-4B vision verdict for the registry note; SmolLM3 registry
-notes could mention thinking-mode + /no_think; desktop swap-raise is NOT
-needed (offload can't work there — no XMX).
+- **USM OOM: filed upstream as openvino.genai#4344 (2026-08-18).**
+  Raw VLMPipeline (plain, no scheduler_config), Glimmer int4 on the B60:
+  first ~33k-token generate fails with a USM Device allocation error;
+  identical retry succeeds. 100% reproducible, with or without short
+  generates first.
 
-## OFFLOAD INVESTIGATION: CLOSED — root cause found, swap raise NOT needed
+  **Diagnosed 2026-08-25, and it corrects what we filed.** The buffer is a
+  **full-sequence logits allocation**: every failure size decodes exactly as
+  `vocab_size × sequence_length × dtype_width`, no remainder, for all four
+  numbers we have. Glimmer's `vocab_size` is 202,048 and the repro prompt is
+  39,658 tokens:
 
-`OFFLOAD_RATIO` requires an **XMX-capable GPU**: the MoE fusion it depends on is gated
-`if (device_info.supports_immad && oneDNN)` in the GPU plugin
-(transformations_pipeline.cpp). The 285K's Xe-LPG iGPU has no XMX
-(OPTIMIZATION_CAPABILITIES lists no GPU_HW_MATMUL — verified) → silent no-op on this
-machine, regardless of export vintage, pagefile, or ratio. Proven end-to-end: fresh
-2026.3-stack LFM2-8B-A1B export (tiled expert constants confirmed in the IR) loads and
-runs 27 tok/s on the iGPU with byte-identical 14.91 GB device memory at ratio 0 and 90.
+  | run | requested | decodes as | vs prompt |
+  |---|---|---|---|
+  | 2026-08-25 control | 32,095,728,896 | 202,048 × 39,713 × 4 | +55 |
+  | 2026-08-25 warmed | 32,056,935,680 | 202,048 × 39,665 × 4 | +7 |
+  | 2026-08-18 #1 | 16,049,884,928 | 202,048 × 39,718 × 2 | +60 |
+  | 2026-08-18 #2 | 16,031,296,512 | 202,048 × 39,672 × 2 | +14 |
 
-Consequences:
-- **Do NOT bother raising swap for the 30B re-export** — it cannot offload here anyway.
-- The **Arc 140V laptop HAS XMX** — that's the machine to validate offload on (fresh-stack
-  export + ratio 0 vs 90 + GPU_MEMORY_STATISTICS). The LFM2-8B-A1B-int4-2026.3 export
-  (~4.5 GB, `~/models`) is the ready-made test artifact to copy over.
-- For #19: ask Dmitriy what GPU his laptop has before promising anything — 128 GB RAM
-  suggests Meteor/Arrow Lake-H (no XMX → no offload for him either). Draft updated.
-- Big-MoE loads OOM in staging on non-XMX iGPUs (11.6 GB model on 33 GB device fails);
-  that's the same missing fusion, not a memory setting. Full log in TODONT.md.
+  Generation needs the **last position only** — 202,048 × 4 = 808 KB. The
+  allocation is ~39,700x that and scales with prompt length. The whole KV
+  cache for the same prompt is 1.97 GB, so the logits buffer is 16x the KV.
 
-## Waiting on Tommy
+  **The ×1.1 reading we filed was wrong — retracted upstream.**
+  `202,048 = 11 × 18,368`, so *every* allocation of the form
+  `vocab_size × n × width` for this model divides by 1.1 exactly, for any n.
+  We pattern-matched a property of the vocabulary onto
+  `buffers_preallocation_ratio` and sent Intel down that path. Worth
+  remembering as a method failure, not just a wrong answer: two data points
+  fitting a ratio is not evidence when the ratio's factors sit in the
+  operands.
 
-1. **Upload go-ahead**: 4 validated builds with model cards + LICENSEs ready in
-   `~/models/{SmolLM3-3B-int4-cw, SmolLM3-3B-int8-cw, LFM2-1.2B-int4-cw, LFM2.5-1.2B-Instruct-int4-cw}`
-   → `hf upload` under your namespace, then add to `models.json` (npu category).
-2. **#19 comment**: draft at scratchpad `issue19-comment-draft.md` — update with the
-   LFM2-8B-A1B result before posting.
-3. **Revoke unattended permissions**: delete `"PowerShell"`, `"Bash"`, `"WebFetch"` from
-   `.claude/settings.local.json`.
-4. **Disk cleanup** (~40 GB of experiment leftovers in `~/models`, nothing deleted):
-   `LFM2-1.2B-int8-cw`, `LFM2.5-1.2B-Instruct-int8-cw` (NPU garbage), `LFM2-1.2B-int8-asym`,
-   `LFM2-1.2B-int8-new`, `LFM2-1.2B-int4-cw-v2` (experiments), `SmolLM3-3B` (superseded),
-   `Qwen3-30B-A3B-int4-ov`, `LFM2-24B-A2B-int4-ov` (failed controls, ~27 GB);
-   keep `_src-Qwen3-30B-A3B` until the export succeeds.
+  Unexplained: the August sizes decode at width 2 and today's at width 4 on
+  the same nominal build — the buffer appears to have gone fp16 → fp32 and
+  doubled, which moved the failure from "16 GB alloc fails" to "32 GB exceeds
+  the 25,055,051,776 device maximum outright". Only known change on the box
+  is the Windows Intel graphics driver.
 
-## Session verdicts (full detail in TODONT.md + CLAUDE.md)
+  Intel's suggested workaround (a dummy short generate first) **does not
+  work** — measured 2026-08-25, fails identically. It does tighten the
+  predicted length from prompt+55 to prompt+7, i.e. 0.12% against a 7.0 GB
+  gap. The CB path avoids the whole thing because chunked prefill never
+  allocates the full-sequence buffer — consistent with scheduler_config being
+  the workaround AND with CB's slower cold prefill. Bonus bug found while
+  testing: setting `OV_GPU_SHAPE_PREDICTOR_SETTINGS` (a RELEASE_INTERNAL
+  option) crashes pipeline construction — `ShapePredictor::Settings` has no
+  string parser ("Bad as from std::string"), so the env knob is unusable
+  and a bad value kills the load.
 
-- NPU: SmolLM3-3B / LFM2-1.2B / LFM2.5-1.2B all work on 2026.3 — but ONLY channel-wise
-  exports (`download-model.ps1 -Weight int4-cw|int8-cw`); default int4 crashes the vpux
-  compiler. LFM int8 is a trap (sym=garbage, asym=1.4 tok/s). LFM builds are NPU-only.
-- EAGLE-3: works; +6% GPU, +14% CPU on Qwen3-8B. Draft export needs venv-2026.3 stack.
-- OFFLOAD_RATIO: not validated on this box — every big-MoE load dies in USM Host staging
-  before offload matters (even 11.6 GB on the 33 GB iGPU); old-vintage IRs additionally
-  can't fuse to MOECompressed. Mechanism notes in TODONT.md.
-- Qwen3.6-35B-A3B: NPU dead (shape inference), iGPU dead (staging OOM). Parked.
+  **To file as its own ticket, deliberately deferred (2026-08-25.)** It is
+  independent of the logits-allocation bug above, and now more orphaned than
+  before: ShapePredictor is no longer implicated in that bug at all, so this
+  will never get attention buried as a "bonus" in a ticket about something
+  else. Holding it until #37501 is resolved rather than filing now — two open
+  tickets from us on the same subsystem, one of which we already had to
+  retract a theory in, is a good way to get both triaged slowly. When filing:
+  minimal repro (set the env var, construct any pipeline, it dies), state
+  plainly that the ask is either a string parser for
+  `ShapePredictor::Settings` or for the option to reject bad input without
+  killing construction. Re-run the repro first — it has not been retested
+  since 2026-08-18. Weight staging through host/shared memory
+  is by design (two-stage allocation, memory_allocation_gpu_plugin.md); no
+  public knob for device-direct loading; `usm_policy`/`disable_usm` are
+  debug-caps-only. Windows "shared GPU memory" is the WDDM half-of-RAM
+  budget — discrete GPUs have it too, no iGPU required.
 
-CUDA column (2026-08-07): Ollama qwen3-coder-next Q4 (53 GB) on RTX 5090
-32 GB + CPU auto-split (58/42): **70-75 tok/s decode**, prefill ~265 tok/s
-warm. 6-8x the OpenVINO-CPU route for the same model family (different
-quant: Q4 vs int8 — best-route-per-stack, not controlled A/B). Untuned;
-llama-server with --n-cpu-moe expert pinning would likely add more.
+- **Local sparse checkouts of Intel sources** (for grepping docs + GPU
+  plugin internals): `C:\devel\intel\openvino` (docs/articles_en +
+  src/plugins/intel_gpu, shallow) and `C:\devel\intel\openvino.genai`
+  (site + src). Machine has no git-lfs — clone with
+  `GIT_LFS_SKIP_SMUDGE=1` and LFS filters disabled; partial-clone sparse
+  blob fetch dies on this network, plain `--depth 1` works.
+
+- **Loading a big model stages through host memory first.** Watched on the B60
+  (17 GB Glimmer): shared GPU memory ramps to near its 16 GB ceiling and holds
+  there while dedicated VRAM stays flat, then dedicated fills, then shared
+  drains. So **peak host RAM during load is roughly model-sized even on a
+  discrete card** — worth knowing before assuming 24 GB of VRAM makes system RAM
+  irrelevant.
+
+- **`hf download` stalls on large files via Xet.** It sat at 0.00 CPU with a
+  `.lock` on the 14.9 GB blob. `HF_HUB_DISABLE_XET=1` resumed it and ran at
+  ~78 MB/s. Also leaves an abandoned partial in `.cache/huggingface/download`
+  that has to be deleted by hand (17 GB of files, 28.7 GB on disk until then).
+
+- **Glimmer into `install.ps1`/`models.json`: waits for OpenVINO 2026.4 as a
+  *release*.** Standing rule: leading edge, not bleeding edge. The GenAI
+  reroute works on the 2026.4 nightly, but a menu item that needs a nightly
+  wheel is bleeding. When 2026.4 releases, the entry is Intel's
+  `OpenVINO/Muse-Glimmer-30B-int4-ov` with `"requires_nightly"` dropped —
+  the manual path until then is `install.ps1 -Nightly` plus a hand
+  download (`install-optimum.ps1` is no longer the recommended Glimmer
+  path, only the `--backend optimum` fallback). Docs may say we know it
+  will work; the installer may not act on it.
+
+  **Qwen3.8 27B rides the same gate** (removed from `models.json`
+  2026-08-21). It had a menu entry carrying `requires_nightly: true`, which
+  contradicted this very rule; the rule wins. Re-add
+  `OpenVINO/Qwen3.8-27B-int4-ov` when 2026.4 ships as a release — and test
+  it first, since it was never run here.
+- **`transformers` main breaks the optimum backend's text-only path.**
+  `5.16.0.dev0` calls `get_experts_implementation()` from
+  `_optimize_model_for_decode()`; `OVModelForCausalLM` doesn't implement it, so
+  `generate()` dies. `OVModelForVisualCausalLM` has its own `generate()` and is
+  unaffected — the only reason Glimmer works. This will bite `nemotron_h`, which
+  is text-only. `install-optimum.ps1 -TransformersRef main` is the exposure:
+  decide between pinning a known-good ref and waiting for optimum-intel.
+- **Offload non-determinism on the B60, unexplained.** At
+  `--offload-ratio 30`, greedy decoding returned 87-2040 tokens for the same
+  prompt across five runs (resident: 478 every time). Varying length proves
+  something varies; nobody has looked at whether the content is wrong or merely
+  different. Detail in TODONT.
+- **The offload split didn't track the ratio.** Ratio 30 left 3.2 GB of 15.2 GB
+  resident (~24%) where the 140V measured 10.8 GB (~71%), with 21 GB of VRAM
+  free. Either the ratio is a ceiling a demand-driven expert LRU never fills, or
+  it behaves differently on discrete hardware. Runs at 50 and 90 would tell.
+- **Ollama head-to-head needs redoing with the temperature pin.** The old
+  comparison had Ollama sampling (its default 0.8) against NoLlama greedy (0.0),
+  because `benchmark.py` sent no temperature. Fixed now. The 1.6× decode figure
+  probably survives; the *task-time* reading of it does not, because Ollama's
+  build ignores `/no_think` and spends ~1755 tokens on a 291-character answer
+  where NoLlama spends 293. Needs Ollama on the 140V.
+- **Nemotron Lightning: still blocked upstream.** PR #1789 merged descoped — no
+  `nemotron_h` exporter. Decide whether to file the optimum-intel feature request
+  offering to test (the pattern that worked for Glimmer, issue #1927).
+- Re-run the TODONT comprehension test on each new OpenVINO release.
+- Qwen3.5-4B vision verdict for the registry note (`models.json`).
+- SmolLM3 registry notes could mention thinking-mode + `/no_think`.
+
+## Benchmarking notes for whoever runs the next one
+
+- **Use the 285K or the B60 box, not the laptop.** A busy 140V reads ~30% low
+  (Qwen3-8B int4-cw: 14.8 tok/s with a browser and chat apps running, 19.4
+  quiet). Decode figures across the table were verified sound on the 285K
+  (SmolLM3 iGPU 29.4 vs 29.7 published, Qwen3-8B 14.6 vs 15.4).
+- **Kill servers by port owner, not by pid.** A venv built from the Microsoft
+  Store Python has a redirector at `venv\Scripts\python.exe`, so
+  `Start-Process -PassThru` returns the launcher's pid and the real server
+  survives being stopped. The next server then fails to bind and the benchmark
+  quietly keeps talking to the previous model. `scripts/bench-b60.ps1` kills by
+  port and asserts `/health` reports the expected model; copy both.
+- **Detached `pwsh` launched over SSH dies when the session ends.** Long
+  orchestration runs need to be started locally, or driven one step per SSH
+  call.

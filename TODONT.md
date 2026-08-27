@@ -3,6 +3,437 @@
 Things we tried that didn't work, or that work but aren't worth doing. Each
 entry explains *why not* so we don't re-litigate it in six months.
 
+## A Gemma-family guard to honour upstream's `requires_sdpa()` (2026-08-21)
+
+Idea: openvino_genai's `requires_sdpa()` forces the plain SDPA backend by
+default for GEMMA3 + GEMMA4_UNIFIED on `releases/2026/3` (Intel tickets
+171180 / 189844) because PagedAttention could not represent Gemma's
+non-diagonal attention masks. Passing `scheduler_config` takes the
+`explicitly_requires_paged_attention` branch and walks straight past that
+guard -- which is exactly what NoLlama's default-on prefix caching does. The
+proposed fix was a version-gated special case: skip the CB backend for those
+architectures when the runtime is older than 2026.4.
+
+**Verdict:** not needed. Measured, don't add it.
+
+**Why not:** A/B'd CB (PagedAttention) against `--no-prompt-cache` (plain
+SDPA) on the Arc Pro B60, 2026.3 release, greedy, identical inputs:
+
+- `gemma-4-26b-a4b-it-int4-ov` -- **7/7 answers byte-identical**, including
+  an exact three-line OCR transcription and the same wrong dot count. CB
+  genuinely engaged (`prefix caching on`, `kv_pool_gb: 2`). This is the
+  load-bearing result: biggest model, real PagedAttention.
+- `gemma-4-E2B-it-int4-ov` -- 5/7 identical. The two divergences were
+  second-pass punctuation (`Red green blue` / `Red, green, blue`) and one
+  grid-reading case where SDPA answered correctly and CB denied the image.
+  Across the repeat runs that is **1 success in 24 attempts**, on the one
+  task sitting exactly at that model's capability ceiling. Noise, but it is
+  the single datapoint a skeptic would cite, so it is recorded rather than
+  rounded away.
+- `gemma-4-E4B-it-int8-ov` -- inapplicable: its IR cannot build the CB
+  backend at all (below), so both runs were the same plain pipeline and the
+  match is tautological.
+
+Corroborating: the same prompts through Ollama/llama.cpp on an RTX 5090
+produced byte-identical OCR and the same per-size counting bias, i.e. the
+stacks feed the model equivalent visual information. Nothing in the
+measurements looks like corrupted attention.
+
+Also note the guard is gone on master (`requires_sdpa()` is a stub returning
+false), so upstream considers this fixed for 2026.4 -- a special case would
+have been dead on arrival there anyway.
+
+Re-evaluate if: a Gemma vision model shows *systematic* divergence between
+the CB and plain paths on the same inputs -- multi-image, long-context, or
+the audio path, none of which were exercised here.
+
+## Gemma 4 E4B for agent serving on OpenVINO 2026.3 (2026-08-21)
+
+Idea: `OpenVINO/gemma-4-E4B-it-int8-ov` is the sweet spot on paper -- reads
+detail E2B cannot, a third of the 26B's footprint, and Intel publishes it
+ready to run.
+
+**Verdict:** not for agent workloads on this runtime. It gets **no prefix
+caching**, so every turn re-prefills the whole system prompt.
+
+**Why not:** the CB backend is built by rewriting the graph, and this IR has
+nothing to rewrite:
+
+```
+No ScaledDotProductAttention operation observed in the graph,
+cannot perform the SDPAToPagedAttention transformation.
+); using plain pipeline
+```
+
+NoLlama degrades correctly (warning at load, `kv_pool_gb` null in
+`/health`, prewarm skips the slot) -- it simply cannot cache.
+
+**It is an export defect, and we proved it by re-exporting.** The same
+`google/gemma-4-E4B-it` weights, same INT8 precision, current stack
+(optimum-intel 2.2.0.dev0, transformers 5.5.4, OpenVINO 2026.3) produce 42
+fused SDPA ops -- one per layer -- and prefix caching engages. Identical
+7.8 GB, identical 42-layer / 84 KB-per-token geometry; only the attention
+differs. Nothing in the published model's name, size or precision hints at
+which one you have.
+
+Correction to an earlier reading of this: the transformers version in the
+IRs (5.5.4 on the two that work, 5.5.0 on E4B) is **correlation, not
+cause** -- `_supports_sdpa` is True on both. optimum-intel pins the
+attention implementation only for models in `FORCE_ATTN_MODEL_CLASSES`
+(`phi3_v`, `gemma2`, `llama4`), and `gemma4` is absent, so the export
+environment decides. That is how two builds of one model diverge.
+
+Second trap for anyone re-exporting it themselves: the chat template is
+baked into `openvino_tokenizer.xml` rt_info **at export time**, so replacing
+`chat_template.jinja` afterwards does nothing. Google's raw template uses
+Python-style implicit string concatenation inside `raise_exception(...)`,
+which openvino_genai's C++ Jinja parser rejects ("Expected closing
+parenthesis in call args"). Intel post-processes that away -- their template
+is 16,317 bytes against Google's 18,569, with zero `raise_exception`. A DIY
+export needs the patched template in the source directory *before* running
+the exporter, or it loads and caches but dies at warmup.
+
+**What the defect actually costs**, measured on the B60 with a ~7.9k-token
+repeated prefix (the shape of an agent's fixed system prompt), 2026-08-21:
+
+| | turn 1 | turn 2 | turn 3 |
+|---|---|---|---|
+| Intel's IR (no cache possible) | 2.63s | 3.06s | 3.03s |
+| our re-export (prefix cache) | 5.92s | **1.16s** | **1.16s** |
+
+Note the honest shape: Intel's IR is *faster cold*, because the CB path
+prefills more slowly (the same trade recorded for Glimmer). Ours pays a
++3.3s premium once and then runs **2.6x faster per turn**, breaking even
+cumulatively by turn 3 -- and with prewarm the cold turn is paid before the
+port answers, so every user-visible turn is the fast one. So this is "wrong
+model for agent loops", not "catastrophically broken".
+
+Quality is unaffected either way: our re-export answered **7/7 probe cases
+byte-identically** to Intel's, including both of its wrong answers (16 for
+17 dots, 8 for 7). The re-export adds a capability; it changes nothing else.
+
+Re-evaluate if: Intel re-exports E4B, or `gemma4` lands in
+`FORCE_ATTN_MODEL_CLASSES`. Verify by grepping the IR, not by assuming --
+see `docs/dev/prefix-cache.md`.
+
+## Untracking the model-watch state file (2026-08-18 -> reverted 2026-08-21)
+
+Idea: `scripts/seen_models.json` is `model_watch.py`'s state. It churned on
+every branch and showed up in four merge diffs for no reason, so cc387fc
+gitignored and untracked it, leaving the file on disk.
+
+**Verdict:** reverted. The GitHub Action cannot work without it tracked. Do
+not untrack it again.
+
+**Why not:**
+- `.github/workflows/model-watch.yml` finishes with `git add
+  scripts/seen_models.json` + `git push`. `git add` on an ignored, untracked
+  path is a **fatal error** ("The following paths are ignored by one of your
+  .gitignore files"), so the last step fails and every run ends red.
+- Worse, the run is already useless before it goes red. A CI checkout has no
+  state file, so `model_watch.py` reads nothing, falls into `seen = set()`,
+  and takes the `baseline` branch: it prints "Baseline established", returns
+  0, and **never sets `new=true`**. No issue is ever opened again. The
+  notifier silently stops notifying, and the only visible symptom is a red X
+  on a `git` step that reads like a permissions hiccup.
+- The state has to survive a week between scheduled runs. `actions/cache` is
+  the obvious alternative, but a cache miss reproduces exactly the
+  silent-baseline failure above — trading a visible cosmetic problem for an
+  invisible correctness one.
+
+The churn complaint was real but cosmetic, and has a proper fix:
+`.gitattributes` marks the file `linguist-generated=true`, which collapses it
+in GitHub diffs while keeping it tracked.
+
+Caught before it bit. The untrack landed Tuesday 2026-08-18, after that
+Monday's run (the one that opened #29), so the next scheduled run — Monday
+2026-08-24 — would have been the first broken one. Restored snapshot is
+byte-identical to 500a15c, the last state CI committed, so nothing gets
+re-reported.
+
+## GigaChat-20B-A3B conversion (2026-08-13, issue #27)
+
+Idea: Dmitriy Teteruk tried converting `ai-sage/GigaChat-20B-A3B-base`
+(Sber's DeepSeek-MoE-based 20B-A3B). On paper a good NoLlama shape — MoE,
+~3B active, would suit the offload path and the agent workload.
+
+**Verdict:** unconvertible today. He abandoned it and closed the issue.
+Don't recommend it or spend a download until upstream moves (conditions
+below).
+
+**Why not:**
+- The exporter is NOT the wall: optimum-intel registers `deepseek`
+  (`DeepseekOpenVINOConfig`, model_configs.py:4239 in the venv's 1.27
+  stack), alongside `deepseek_v2`/`deepseek_v3`.
+- The wall is the model repo's remote code. GigaChat ships its own
+  `modelling_deepseek.py` (trust-remote-code), which imports `LossKwargs`
+  from `transformers.utils` — removed in modern transformers. 4.55 still
+  failed for him; pinning 4.53.3 let the conversion start.
+- At 4.53.3 the stack then failed anyway — his final report: the model
+  "used old transformers version that is not compatible with openvino".
+  The exact second error was never captured, so we don't know whether that
+  wall is optimum/nncf versioning or something deeper.
+- Net: remote code needs transformers ≤4.53, the export stack needs newer,
+  and no overlap window was found. (Reading note: his closing comment
+  "Finally, it does now work" is missing a *not* — the rest of the
+  sentence and the issue closure make the meaning unambiguous.)
+
+Re-evaluate if: (a) Sber updates the repo's remote code for current
+transformers — the `LossKwargs` import is the visible blocker, and a hand
+shim (`class LossKwargs(TypedDict, total=False)` in a patched local copy)
+might bridge it for a determined attempt, unverified; (b) transformers
+gains a native implementation of the V1 `deepseek` MoE architecture so
+remote code isn't needed at all; (c) anyone captures the actual
+4.53.3-era failure, which would tell us what the second wall really is.
+
+## Glimmer (optimum backend) on Intel iGPUs (2026-08-13)
+
+Idea: serve Muse-Glimmer-30B int4 on the iGPU instead of CPU — the 140V
+warmed up in 2.9s and streamed at ~2.8 tok/s, looked like a win.
+
+**RESOLVED 2026-08-15 — fixed in OpenVINO 2026.4.** On
+`2026.4.0.dev20260814` the issue's own repro quotes the prompt verbatim on
+the B60 GPU and decodes at 8-9 tok/s (vs ~2 while corrupt, and 1.0 on the CPU
+control). The verdict below stands for **2026.3 and earlier**, which is still
+what a `pip install openvino` gives you today — `nollama.py` therefore keys
+its GPU warning on the runtime version, not the device. Everything after this
+paragraph is the pre-fix evidence; keep it, because it is what that version
+check is protecting users from, and because the *method* (same-venv CPU
+control) is what made the verdict trustworthy in both directions.
+
+**Verdict (OpenVINO <= 2026.3):** don't, on **any Intel GPU — integrated or
+discrete** — until a new OpenVINO GPU plugin passes the comprehension test
+below. Xe-LPG fails
+loudly at warmup (`Count is called for dynamic shape`). Xe2 (Arc 140V,
+OpenVINO 2026.3, Windows) is the trap: it runs and *looks* healthy, but
+inference is numerically wrong — and a community report (issue #24,
+2026-08-13) reproduced the identical fingerprint on **Xe3** (Arc B390 iGPU,
+Panther Lake, **Fedora**), so this is the GPU plugin's handling of the
+graph, not one generation's numerics or one OS's driver. The model
+half-perceives the prompt (asked `Respond only with the text "HELLO!"`, its
+think channel quoted the user as saying "Respond only text") and greedy
+decoding degenerates into a two-word loop inside the think channel that
+never ends. The identical IR with identical sampling on CPU quotes the
+instruction verbatim and complies exactly. Diagnosed 2026-08-13 after three
+red herrings (think-block history round-trip, stale failed sends in web-UI
+history — both real bugs, both fixed, neither the cause).
+
+**Discrete Battlemage settled it (2026-08-15).** Arc Pro B60 24 GB, Windows,
+OpenVINO 2026.3: same corruption. The shared-memory hypothesis the iGPU-only
+evidence had suggested is dead — dedicated VRAM behaves identically, so four
+device classes across two OSes now share one fingerprint. Two details worth
+keeping:
+
+- **It is a runaway generation, not a hang.** GPU sat near 100% throughout;
+  the loop would have run to `max_tokens` (16384 from the web UI) and
+  returned garbage after an hour. Cancel works, because the streamer is
+  yielding — this is *not* the uninterruptible-native-code case. Cap
+  `max_tokens` when testing so a corrupt run ends in seconds.
+- **Restating the system prompt in the think channel is normal**, on CPU
+  too — so not every mention of it is a symptom. On the B60 the think
+  channel read `Respond directly.` where the real system prompt is 15
+  words; the CPU control produced the full text. That is the *dropped
+  words* signature, not hallucination. Keep it distinct from the Xe2
+  observation of a wholly **fake** system prompt ("You are an expert in
+  competitive programming…", never sent) — that one is real hallucination
+  and still stands. Two different symptoms; don't merge them.
+
+**Always run the CPU control on the same box, same venv, same session.**
+`install-optimum.ps1` tracks transformers `main`, so the stack moves between
+test runs. Without the control, "the GPU plugin is broken" and "transformers
+regressed since the last test" fit the evidence equally well, and you would
+file the wrong bug upstream.
+
+**Comprehension test** (cheap, definitive): multi-turn chat, ask
+`Respond only with the text "HELLO!"`, expand the thinking. If the model
+can't quote the instruction back, the plugin is corrupting inference —
+no error is raised anywhere.
+
+Scope note: this is the **optimum backend** only. The GenAI path is fine on
+the same hardware — Qwen3.8-27B runs correctly on that same B60 (2026-08-15).
+Don't cite a GenAI-path success as evidence about this bug, or vice versa.
+
+## Port-availability check via bind() probe (2026-05 -> 2026-08-11)
+
+What we had: check_port() tried bind(("0.0.0.0", port)) and treated success
+as "free". Shipped that way from the start.
+
+**Verdict:** replaced with a connect-test (does anything ACCEPT on loopback
+or any hostname-resolved local IPv4 address?). Never use a bind probe for
+"is somebody serving here" on Windows.
+
+**Why not:** Windows treats a specific-address binding and a wildcard bind
+as distinct — bind("0.0.0.0", 11434) SUCCEEDS while real Ollama holds
+127.0.0.1:11434, and Flask then double-binds the same way. Two servers on
+one port: localhost clients reach Ollama (most-specific binding wins), LAN
+clients reach NoLlama. Found live on the fresh-Ryzen test box (2026-08-11);
+reproduced in isolation the same day — a loopback-only listener + a
+successful wildcard bind on the same port, same machine. On Linux the same
+bind fails EADDRINUSE, which is why it looked correct for months.
+_identify_ollama() now also names the incumbent in the warning.
+
+This does not replace exclusivity on the real server socket: NoLlama's
+Werkzeug listeners use `SO_EXCLUSIVEADDRUSE` on Windows so a process started
+later cannot claim a more-specific address on the same port. The connect-test
+exists only to identify an incumbent cleanly before startup.
+
+---
+
+## Meta Muse Glimmer 30B for NoLlama (2026-08-10)
+
+Idea: Meta released Muse Glimmer on HF the day it landed here — Apache 2.0,
+agentic-first (tool calling, multi-step reasoning), multimodal (interleaved
+text+image), explicitly pitched as "runs locally on consumer hardware". On
+paper that is exactly NoLlama's story: GPU/CPU tool calling + VLM routing.
+
+**Verdict:** don't. Not a measurement — arithmetic, from the model card. The
+disqualifier is one architectural fact: it is **dense**, and dense removes
+the only lever that makes a 30B-class model usable on this hardware.
+
+**Shape:** ~29.6B total = **dense** 28B text decoder + ~1.8B ViT perception
+encoder. 52 layers, hidden 6656, GQA 32 q / 2 kv (head_dim 208), interleaved
+local(2048 window)/global attention, RoPE θ=500k, 128k context, vocab 202k.
+Meta's own floor is a **24 GB VRAM envelope** at 4-bit.
+
+**Why not:**
+- **Dense ⇒ `--offload-ratio` is inapplicable.** OFFLOAD_RATIO streams *MoE
+  expert weights*; there are no experts. The thing that made Qwen3-30B-A3B
+  interactive on the 140V (ratio 30 → 10.8 GB resident @ 25.3 tok/s) simply
+  does not exist here. Everything must be resident, with no knob to claw back.
+- **Doesn't fit the 140V.** int4 decoder ≈ 15 GB + vision tower (OV VLM
+  exports keep the encoder at higher precision, ~3.5 GB) + KV (~86 KB/token
+  at full attention; less if OV ever implements the 3-in-4 sliding window,
+  which a brand-new arch won't get on day one) against ~16.5 GB usable.
+  Over budget before the first token.
+- **Dense 28B is ~6× the compute of a peer we already call slow.**
+  `gemma-4-26b-a4b-it-int4` (4B active) does 21.0 tok/s steady-state on the
+  285K CPU. Same total size, dense, touches all 28B per token → expect ~3.
+  The desktop iGPU fits it by memory (33 GB shared) but has no XMX and is
+  bandwidth-bound; prefill on a real agent prompt would be worse than the
+  ~6 min TTFT already logged there.
+- **NPU: out entirely.** 30B dense, and the NPU path caps at MAX_PROMPT_LEN
+  4096 regardless.
+- **No exporter.** New `AutoModelForMultimodalLM` architecture; optimum-intel
+  2.1.0 in `venv-2026.3` predates it. Blocked upstream even if the numbers
+  were good — and per #19 that conversion would be RAM-bound anyway.
+
+**Where it does belong today:** the RTX 5090 (32 GB), outside NoLlama's
+Intel/OpenVINO remit. Ollama shipped an `-mlx` build at launch and says the
+CUDA build follows "in the following days" — that is the path for this model
+on this desk, and it costs us nothing.
+
+**But the verdict inverts on an Arc Pro B70 (32 GB) — the exporter is then
+the only blocker.** Xe2-HPG, 256 XMX engines, **32 GB dedicated GDDR6 at
+608 GB/s**. int4 decoder ~15 GB + vision tower ~3.5 GB ≈ 18-19 GB resident,
+~13 GB left for KV. Bandwidth ceiling 608/15 ≈ 40 tok/s; at the 40-60% of
+peak these reach in practice, **~15-25 tok/s — interactive**. On that card
+the missing offload lever is irrelevant: nothing needs to stream.
+
+**On the B60 (24 GB, 456 GB/s, arriving 2026-08-10 week) it fits — but only
+for agent/chat, not whole-book.** Weight budget swings on how the vision
+tower is exported: decoder int4 ≈ 14.5 GB (≈16 if embeddings/lm_head stay
+int8 — vocab is 202k × 6656, so those two tensors are ~2.7B params on their
+own), vision 1.8B at int8 ≈ 1.8 GB / at fp16 ≈ 3.6 GB. So **16.3 GB best
+case, 19.6 GB worst**, leaving 4-7 GB of KV. At ~84.5 KB/token (52 layers ×
+2 kv heads × 208 head_dim × 2 × fp16) that is **~40-75k tokens** — plenty for
+a 21k agent prompt, and the reason to export the vision tower at int8.
+Meta's own figure is 55 GB bf16 → **18-20 GB at 4-bit**, i.e. the worst case
+above — so budget ~4 GB of KV, ~45k tokens. That is no longer a constraint
+worth worrying about: secondreader retired whole-book prompting entirely on
+2026-08-09 (depth collapse is architectural — every ≤35B model goes thin and
+loses anchors at 120k, while the same models scoped per-chapter produce 20×
+the richness), so the workload this card serves is **scoped chapter calls of
+5-15k tokens**, not 113k. 45k tokens is ample.
+
+**And even with a perfect exporter it is the wrong model class for the
+surviving workload.** Scoped means *many serial calls* (one per chapter), so
+throughput is the figure of merit — and the two local models that actually
+deliver there are **MoE**: gemma4-26b-**a4b** (11,553 words, 901 anchors, 0
+bad) and qwen3.6-35b-**a3b** (the only ≤35B arm to hold [ChN:M] perfectly at
+122k). Both buy 26-35B quality at 3-4B active cost. A dense 28B pays full
+28B compute on every token of every chapter call. Glimmer would be a *peer*
+of gemma4-26b-a4b in capability and several times its cost per artifact.
+
+**The exporter is the whole blocker for now, and it is proven, not suspected
+(checked 2026-08-10, release day):**
+- `config.json` declares `model_type: "muse_glimmer"`,
+  `MuseGlimmerForConditionalGeneration`, nested `muse_glimmer_text` /
+  `muse_glimmer_vision`. **No `muse_glimmer` registration exists in
+  optimum-intel `main`** (`optimum/exporters/openvino/model_configs.py`;
+  newest multimodal entries are gemma4_unified, gemma3n, qwen3_omnimoe).
+  `optimum-cli export openvino` fails at config lookup — no flag routes around
+  a missing exporter config.
+- It requires **transformers 5.15.0.dev0**; `venv-2026.3` is pinned to **5.4**
+  by the LFM2 exporter's cap. That is a third venv, not an upgrade.
+- No `OpenVINO/Muse-Glimmer-*-int4-ov` pre-convert exists yet. Intel shipped
+  the Qwen3-VL pre-export within weeks, so **waiting most likely obtains the
+  export for free** and skips a RAM-bound 55 GB conversion. Do not spend the
+  download until either the pre-convert appears or `muse_glimmer` lands in
+  optimum-intel.
+
+**Capacity is the wrong axis for a dense model — don't reach for the
+big-RAM machine.** Dmitriy's Arc 140T (285H, 128 GB RAM, 110 GB shared-memory
+override) has 2× this desk's RAM and still loses: his ratio-0 Qwen3-Coder-Next
+int8 does 9.1 tok/s on an 80B-**A3B** (~3B active), implying ~45 GB/s
+effective for weight reads. Dense 28B int4 reads ~15 GB *per token* on that
+path → **~2-3 tok/s**. The rule: **MoE is capacity-bound** (huge shared
+memory is the fix — it's why he can run a 74 GB model at all); **dense is
+bandwidth-bound** (only dedicated VRAM is the fix). Adding host RAM to an
+iGPU does nothing for Glimmer.
+
+**Decision 2026-08-11: let Intel do the heavy lifting.** The DIY path is a
+third venv on transformers >=5.15 (5.4 has no `muse_glimmer` module at all —
+and Meta shipped no `modeling_*.py`, so `trust_remote_code` is not a door
+either), plus a hand-written `MuseGlimmerOpenVINOConfig`, plus probable
+`VLMPipeline` per-architecture work on the C++ side. Not worth it for a model
+that would at best tie `gemma4-26b-a4b`. Weights not downloaded — nothing is
+staged locally, and there is no reason to stage it until an export exists.
+
+**The gate is a quality measurement, not the hardware and not the export.**
+Ollama's CUDA build lands within days; run Glimmer through `facts-scoped` on
+the 5090 against oldgods with the terra ruler — a *model* question, fully
+separable from OpenVINO plumbing, answerable in an afternoon with the harness
+that already exists. The row to beat is `gemma4:26b` scoped: **11,553 words,
+901 anchors (0 bad), 54 quotes / 2 flagged, both nine-minute facts + late
+fifties**. If Glimmer does not clear that, the OpenVINO question never needs
+asking. Only if it clears it decisively does the export matter — and by then
+Intel has probably shipped `OpenVINO/Muse-Glimmer-*-int4-ov` anyway.
+
+Re-evaluate if: (a) Glimmer beats gemma4-26b-a4b scoped on the 5090 **and** an
+OpenVINO export exists; (b) a smaller or **MoE** Glimmer variant ships, which
+would restore the offload lever, suit the many-serial-calls shape, and make
+even 16 GB XMX viable. Do **not** re-evaluate on the grounds that some machine
+has more system RAM, more pagefile, or faster internet — none of the three
+walls (transformers implementation, optimum-intel exporter, genai VLM arch) is
+resource-bound.
+
+**Update 2026-08-11:** On hold *until Intel ships a pre-exported OpenVINO
+variant* -- no self-export attempts before that, even though the incoming
+B60 (24 GB) matches Meta's stated 4-bit envelope. The gate is support, not
+hardware. The model-watch bot tracks the OpenVINO org, so the gate opening
+files its own issue; nothing to poll.
+
+**Update 2026-08-13 — two of the three walls fell within 48 h; decision
+superseded by events.** optimum-intel merged `muse_glimmer` support the
+evening the entry above was written (PR #1924, 2026-08-11); we exported
+int4 on the 128 GB workstation the next day and published it
+(`aweussom/Muse-Glimmer-30B-int4-ov`, ~17 GB) — the export cost turned out
+to be one lounge afternoon, not a project. transformers wall: solved by the
+model-lab venv (git-main stack, `scripts/glimmer-export/`). The third wall
+(genai VLM arch) was *bypassed*, not climbed: the `optimum-backend` branch
+serves `muse_glimmer`/`nemotron_h` through optimum-intel's python runtime
+(`OptimumSlot`), text-only, tools working. What this does NOT supersede:
+the model-class analysis above. Dense 28B is still the wrong shape for the
+desktop's scoped-chapter workload, and the quality gate (beat
+`gemma4-26b-a4b` scoped on the 5090) still stands for *that* use. The slot
+exists because (a) it's one implementation serving two models — Nemotron
+3.5 Lightning is 30B-**A3B** MoE, which fits the throughput argument
+perfectly (optimum-intel `nemotron_h` export merged 2026-08-12, PR #1789) —
+and (b) OpenClaw/agent use on owned hardware is a different workload than
+scoped book runs. Ollama-side quality signal so far: Glimmer subjectively
+best-in-class on secondreader (5090, 2026-08-12), formal facts-scoped run
+still pending.
+
 ## Whole-book (100k+) prompts on CPU serving (2026-08-09)
 
 Idea: serve secondreader's whole-novel prompts (~113k tokens) from the 285K
@@ -35,6 +466,33 @@ Re-evaluate if: OpenVINO's CPU plugin gains a dramatically faster prefill
 path (AMX-heavy), or a future NoLlama gains chunked-prefill progress
 reporting + duplicate-request rejection, which would at least defang the
 retry spiral.
+
+**Update 2026-08-10 — don't re-evaluate: the workload is gone.** The entry
+above says whole-book serving "waits for XMX (140V/B60)". It no longer waits;
+secondreader retired whole-book prompting outright on branch `scoped-facts`,
+on **quality** grounds that no hardware fixes. The runtime confound was closed
+in both directions: the identical 113k-token payload ran on the 5090 at full
+speed (prefill 2,100 tok/s, whole artifact in 4 min) and still collapsed —
+2,707 words, 74 anchors all in the wrong format, zero precision probes — while
+the 140V/OpenVINO run of the same model landed statistically identical (2,753
+words, zero anchors, 0/3 probes) after 4h26m. Four local families ≤35B all
+collapse at 120k depth. **The depth collapse is the model, not the runtime and
+not the device.**
+
+What replaced it: **per-chapter scoped calls in a ~10-30k envelope**, merged by
+code. Same gemma4:26b that produced 1,267 words whole-book produces 11,553
+words with **901 anchors, 0 bad** scoped, and recovers precision facts every
+whole-book local arm missed. So for NoLlama the serving profile inverts:
+- KV pool: `--cache-size-gb 12` was a whole-book requirement. Scoped needs
+  ~1-3 GB. The 15+ GB advice in secondreader's `models.ini` block applies only
+  to the retired path.
+- The **prefix cache matters far more now, not less**: scoped runs issue one
+  call per chapter sharing a fixed instruction preamble, so `--idle-timeout 0`
+  + prewarm turns every chapter after the first into a warm-prefix hit. Whole-
+  book had one giant prefix reused across few calls; scoped has a small prefix
+  reused across dozens.
+- Uncancellable-backend hygiene still stands (attempts=1, generous timeout) —
+  but at 10-30k the death spiral is far less reachable.
 
 ## Gemma 4 on the NPU (2026-08-07)
 
@@ -417,3 +875,84 @@ Re-evaluate if: someone runs `benchmark.py --backend ollama` on CPU against
 the same model/quantization and OpenVINO wins by a wide margin — that would
 make CPU worth defending on the same measured grounds as the iGPU. Until
 then, don't claim a speed verdict on CPU in docs or in replies to users.
+
+## Putting the OpenVINO nightly stack in the default install (2026-08-15)
+
+Qwen3.8-27B's Intel-published IR needs OpenVINO 2026.4.0-nightly plus an
+openvino-genai nightly from 2026-08-14+. The obvious move is to bump
+`requirements.txt` — the floors are already `>=`, so a one-line change to
+`openvino>=2026.4.0.dev0` plus the nightly `--extra-index-url` would make
+the model Just Work for everyone.
+
+**Verdict:** don't. Nightlies live behind an opt-in `-Nightly` switch that
+builds a separate `venv-nightly/`, and models that need them are hidden
+from the menus unless it's passed.
+
+**Why not:**
+- `requirements.txt` is the reproducibility promise for every existing
+  user. A nightly index resolves to a different build every day, so two
+  people running the same `install.ps1` on the same commit get different
+  runtimes — and one of them gets whatever broke last night. This is the
+  same objection that kept Glimmer out of the installer (NEXT-STEPS
+  "stack gate"): an installer that builds from a moving target promises
+  reproducibility it can't keep.
+- Intel marks the export itself EXPERIMENTAL / "not fully validated with
+  OpenVINO". Shipping an unvalidated runtime to serve an unvalidated model
+  compounds two unknowns for users who asked for neither.
+- The nightly venv needs `transformers==5.2`, which is incompatible with
+  the `<5` cap `requirements.txt` carries for the qwen3_next exporter. One
+  venv genuinely cannot hold both stacks; forcing it would silently break
+  Qwen3-Next conversions to enable one untested model.
+- The cost of the split is small and already paid elsewhere:
+  `install-optimum.ps1` established the second-venv pattern, and
+  `start-template.ps1` now takes `-VenvName` so both runtimes coexist.
+
+Re-evaluate when: OpenVINO 2026.4.0 ships as a **release** and genai's
+qwen3_5 VLM support lands with it. At that point the nightly switch stops
+being about Qwen3.8 (a plain `requirements.txt` bump serves it) and is only
+worth keeping if a *new* pre-runtime model has taken its place. If none
+has, delete `-Nightly` and `requirements-nightly.txt` rather than
+maintaining an unused path.
+## `--offload-ratio` on a discrete GPU that fits the model (2026-08-18)
+
+Idea: the Arc Pro B60 has XMX, and TODONT/README already record offload as a
+win on XMX hardware (140V: ratio 30 -> 10.8 GB resident @ 25.3 tok/s). A 24 GB
+card should do better still.
+
+**Verdict:** don't. On a card where the model fits, offload is a 5x loss.
+Measured, Qwen3-30B-A3B int4 (15.2 GB) on a B60 (24 GB):
+
+| | resident | `--offload-ratio 30` |
+|---|---|---|
+| decode | **50.8 tok/s** | ~10.5 tok/s |
+| dedicated VRAM | ~15 GB | **3.2 GB** |
+| host (shared) memory | - | **10.2 GB** |
+| GPU copy engine | idle | **97%** |
+| disk activity | - | **0%** |
+
+**Why not:**
+- **It is not streaming from disk.** Both disks sat at 0%. The offloaded experts
+  live in the OS page cache and every token DMAs them across PCIe. The copy
+  engine at 97% is the bottleneck, not storage.
+- **A dGPU pays a bus hop that an iGPU does not.** On the 140V the "offloaded"
+  weights sit in system RAM the GPU addresses directly, so the cost is memory
+  bandwidth (~136 GB/s). On a discrete card it is PCIe against 450 GB/s of VRAM.
+  **Memory topology is the axis, not XMX** - XMX is merely required. The earlier
+  framing ("requires XMX", implying XMX is the qualifier) reads as an
+  endorsement on any XMX card; it is not.
+- **The resident/offload split did not track the ratio.** Ratio 30 left 3.2 GB
+  of 15.2 GB resident (~24%), where the 140V measured 10.8 GB (~71%) at the same
+  setting, with 21 GB of VRAM free and nothing forcing eviction. Either the ratio
+  is a ceiling that a demand-driven expert LRU never fills, or it behaves
+  differently on discrete hardware. Unresolved; would need runs at 50 and 90 to
+  tell which.
+- **Generation stopped being reproducible.** Under greedy decoding (temperature
+  0) the same prompt returned 87, 1944, 1951, 1962 and 2040 tokens across five
+  runs, four of them hitting the token cap, where the resident run returned 478
+  every time. Varying length proves *something* varies; it does not prove the
+  numerics are wrong. Flagged, not diagnosed.
+
+Re-evaluate if: a later OpenVINO makes the split honour the ratio on discrete
+hardware, or someone measures offload against `--device CPU` on a dGPU that
+genuinely cannot fit the model. That second case is the only one where offload
+on a dGPU might still be the right answer, and nobody has measured it.

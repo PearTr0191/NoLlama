@@ -1,5 +1,83 @@
 # TODO
 
+## Shim fixes from the fresh-Ryzen first-contact test (2026-08-11, still open)
+
+Live test of install-windows.bat on a fresh Win11 box (Ryzen 5950X/RX580):
+pwsh prompt, winget install, Store-stub detection and both re-run paths all
+worked -- but two things to fix:
+
+1. **pwsh probe missed after winget install.** The direct-continue probe only
+   checks `%ProgramFiles%\PowerShell\7\pwsh.exe`; winget did a per-user/MSIX
+   install, so the .bat fell back to "close and re-run". Also probe
+   `%LocalAppData%\Microsoft\WindowsApps\pwsh.exe`.
+2. **Don't make Python the user's problem.** NoLlama needs Python, the user
+   shouldn't need to know. Cheap version: install via winget automatically
+   (notice, not Y/N prompt), then skip the second re-run by probing
+   `%LocalAppData%\Programs\Python\Python3xx\python.exe` and passing it to
+   install.ps1 via a new `-PythonExe` param (install.ps1 currently only does
+   Get-Command python/python3).
+
+## Later: uv instead of system Python
+
+The thorough answer to "don't require Python": `uv` is a single static
+binary, no admin, that fetches its own private CPython and builds the venv
+(and installs deps much faster than pip). Would remove the Python
+prerequisite entirely -- but means reworking install.ps1's venv creation,
+so it's a minor-version project, not a patch.
+
+---
+
+## No-think toggle is prose, not the native switch (2026-08-15)
+
+The web UI's "No-think" checkbox sends a **system prompt in English**:
+
+```js
+const NO_THINK_PROMPT = 'Respond directly and concisely, with no internal
+                         reasoning preamble. Reasoning strength: minimal.';
+```
+
+The second sentence is Muse Glimmer's native control and works there. For
+the Qwen3 family it is just prose. Qwen3.8's `chat_template.jinja` shows the
+real switch:
+
+```jinja
+{{- '<|im_start|>assistant\n' }}
+{%- if enable_thinking is defined and enable_thinking is false %}
+    {{- '<think>\n\n</think>\n\n' }}     {# pre-closed: no channel to fill #}
+{%- else %}
+    {{- '<think>\n' }}                   {# generation starts inside the block #}
+{%- endif %}
+```
+
+`enable_thinking=false` **structurally forecloses** the channel before the
+model writes a token. Prose cannot: the template has already opened the
+block, so the best the model can do is reason briefly and then stop.
+Observed on the B60 (2026-08-15, Qwen3.8-27B): it acknowledged the request
+*inside* its reasoning — "Constraint 3: Reasoning strength: minimal" — and
+reasoned anyway. Not a bug in the model; we asked in the wrong language.
+
+Same story for SmolLM3, whose family switch is `/no_think`. Two of the three
+model families in the registry don't speak the dialect we send.
+
+To do:
+1. Find out whether openvino-genai exposes chat-template kwargs on
+   `LLMPipeline`/`VLMPipeline` (does `Tokenizer.apply_chat_template` take
+   `enable_thinking`, and can the serving path reach it?). This gates
+   everything else — if the template is applied inside the pipeline with no
+   hook, the fallback is to render the prompt ourselves.
+2. Route the toggle per model family rather than sending one string to all:
+   `enable_thinking=false` (Qwen3.x), `/no_think` (SmolLM3), the
+   `Reasoning strength:` line (Glimmer). Keep the prose as the default for
+   families we don't recognise — it degrades gracefully, as seen above.
+3. Only then consider exposing it on the API surface
+   (`chat_template_kwargs`, which is what OpenAI-compatible clients send).
+
+Do NOT put the literal string `<think>` in a system prompt as a shortcut —
+models mimic the tags straight into their answer text (observed on Glimmer,
+2026-08-13; the existing comment in app.js records this).
+
+---
+
 ## Load GGUF directly — openvino-genai already can (2026-08-06)
 
 openvino-genai 2026.1 ships a **GGUF reader** we don't expose at all

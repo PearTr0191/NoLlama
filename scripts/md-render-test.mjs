@@ -1,4 +1,4 @@
-// Node harness for the self-contained markdown renderer in static/js/app.js.
+﻿// Node harness for the self-contained markdown renderer in static/js/app.js.
 // Extracts the pure functions straight from the shipped file (no build step)
 // and runs the table pass plus the regression cases the renderer is known to
 // handle. Run from the repo root:  node scripts/md-render-test.mjs

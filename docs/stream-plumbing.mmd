@@ -1,0 +1,60 @@
+%% Token streaming: the stream_tokens seam, its consumers, cancel semantics.
+%% Drawn 2026-08-19 from nollama.py @ 85e796f.
+%% Legend: solid = normal path, dashed = failure/timeout/cancel paths,
+%%         ALL-CAPS nodes = prose annotations.
+%% Palette: route (blue) = protocol consumers, gen (green) = backend/worker,
+%%          client (yellow) = wire frames, warn (orange) = annotations.
+%% covers: nollama.py:stream_tokens,stream_llm,stream_vlm,_ollama_stream_chat,_ollama_stream_generate,generate_llm,cancel,explain_genai_error,_AtemStreamFilter,_AtemPlainFilter
+flowchart TB
+  stream_tokens["DeviceSlot.stream_tokens<br/>SEAM between backend and protocol.<br/>Owns: worker thread, lock, clearing<br/>_cancel INSIDE the lock, _stream_error.<br/>Yields str chunk, or None after
+  'heartbeat' quiet seconds"]
+  worker["worker thread:<br/>pipe.generate(history, gen, streamer_callback)<br/>tokens -> Queue; sentinel None in finally"]
+  opt_stream_tokens["OptimumSlot.stream_tokens<br/>same contract over transformers<br/>TextIteratorStreamer; ATEM markers kept<br/>visible for _AtemStreamFilter"]
+
+  stream_tokens --> worker
+  worker -.->|"backend exception"| _stream_error["_stream_error set;<br/>explain_genai_error names the fix<br/>(KV pool too small, NPU compiler, ...)"]
+
+  stream_llm["stream_llm (OpenAI SSE)<br/>None -> empty-content delta keepalive;<br/>first token stamps wall-clock TTFT"]
+  _ollama_stream_chat["_ollama_stream_chat (ndjson)<br/>None after 120s ABORTS<br/>(historical no-token timeout)"]
+  _ollama_stream_generate["_ollama_stream_generate (ndjson)<br/>same abort; no TTFT"]
+  generate_llm["generate_llm (OptimumSlot)<br/>non-streaming = joined stream,<br/>heartbeat=None blocks forever"]
+
+  stream_tokens --> stream_llm
+  stream_tokens --> _ollama_stream_chat
+  stream_tokens --> _ollama_stream_generate
+  opt_stream_tokens --> generate_llm
+
+  stream_vlm["stream_vlm<br/>own worker+queue (VLMPipeline takes<br/>prompt+images, not ChatHistory);<br/>180s quiet timeout, no keepalive pings"]
+
+  atem["_AtemStreamFilter / _AtemPlainFilter<br/>Glimmer channel routing -> think blocks.<br/>StreamFilter keys on live markers<br/>(optimum path keeps special tokens);<br/>PlainFilter keys on detokenized<br/>'to=self' / 'assistant to=user' text<br/>(GenAI strips the markers)"]
+  stream_vlm --> atem
+  opt_stream_tokens --> atem
+
+  cancel["cancel / client disconnect<br/>_cancel.set() -> streamer_callback<br/>returns True -> generation stops"]
+  stream_llm -.-> cancel
+  stream_vlm -.-> cancel
+
+  FINALLY["THE CANCEL SAFETY NET LIVES IN THE CONSUMERS, NOT THE SEAM:
+  each consumer's finally does _cancel.set() so a client disconnect
+  stops generation. It cannot move into stream_tokens - a generator's
+  finally also runs on normal exhaustion, which would make the
+  consumer's was_cancelled = _cancel.is_set() read True on every
+  completed stream. Mirror rule: _cancel is CLEARED inside the lock in
+  the worker, else it races the previous request's finally."]
+  cancel -.-> FINALLY
+
+  CANCELLIMIT["Cancel relies on OpenVINO invoking the streamer callback.
+  A blocked prefill never yields, so cancel cannot take effect until
+  prefill ends - an aborted client leaves the generation churning.
+  This is why keepalive (not abort-and-retry) is the strategy for
+  slow prefills."]
+  cancel -.-> CANCELLIMIT
+
+  classDef route fill:#e6f0ff,stroke:#0066cc,color:#000
+  classDef gen fill:#e6ffe6,stroke:#00b300,color:#000
+  classDef client fill:#ffffcc,stroke:#b3b300,color:#000
+  classDef warn fill:#fec,stroke:#a60,color:#000
+  class stream_llm,_ollama_stream_chat,_ollama_stream_generate,generate_llm route
+  class stream_tokens,opt_stream_tokens,worker,stream_vlm,atem gen
+  class cancel,_stream_error client
+  class FINALLY,CANCELLIMIT warn

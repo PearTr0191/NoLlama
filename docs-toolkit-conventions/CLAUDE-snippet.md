@@ -1,85 +1,16 @@
-# NoLlama
+# The CLAUDE.md block
 
-OpenAI-compatible LLM/VLM server for Intel hardware. NPU-first.
+`install --project` writes everything between the two markers below into your
+repo's `CLAUDE.md` (or `AGENTS.md`, or `CONTRIBUTING.md` — `--doc <file>`).
+Re-running updates it in place, so it is safe to install repeatedly.
 
-## Architecture at a glance
+The markers matter: without them a second install duplicates the block, and
+nobody notices until the file is 400 lines of the same three rules.
 
-- `nollama.py` — Flask server, `DeviceSlot` class per device, auto-detects
-  VLM/LLM from `config.json`. `threaded=True`, concurrency via per-device locks.
-- NPU: `LLMPipeline` with MAX_PROMPT_LEN=4096 (driver default is 1024),
-  streaming via SSE.
-- GPU: `VLMPipeline` (images) or `LLMPipeline` (text). Both stream as of
-  openvino-genai 2026.1 — verified on Arc 140V iGPU.
-- Routing: images go to GPU, text goes to NPU (or GPU if no NPU).
-- Whisper: `WhisperSlot` + `WhisperPipeline` for STT,
-  `POST /v1/audio/transcriptions`, CPU or GPU.
-- Prefix (KV) caching is **default on** for GPU/CPU **LLM and VLM** slots;
-  NPU keeps the plain pipeline. → `docs/dev/prefix-cache.md`
-- Tool calling works on **GPU/iGPU + CPU only, never the NPU**, on both LLM
-  and VLM slots. → `docs/dev/tool-calling.md`
-- Most models run on openvino_genai; a few need optimum-intel's python
-  runtime (`--backend`). → `docs/dev/runtime-stacks.md`
-- `models.json` — curated model registry (npu, gpu_vlm, gpu_llm, whisper).
-  `install.ps1` detects devices, shows the model menu, generates `start.ps1`;
-  agent setups get `--idle-timeout 0` (keeps the prefix cache alive,
-  auto-enables prewarm).
-- Web UI: `templates/index.html` + `static/css/style.css` +
-  `static/js/app.js`. Collapsible `<think>` blocks, "Just answer me,
-  dammit!" button, temperature slider. Markdown rendering
-  (`mdEscapeAndRender`, PR #23) is hand-rolled, no library — **attribute
-  values must go through `escapeAttr` + `safeUrl` (scheme whitelist), never
-  `escapeHtml` alone** (XSS fixed in review). Streaming scroll is
-  pinned-but-releasable (`streamState`/`updateStreamBubble`): follows the
-  stream until the user scrolls up.
-- OpenVINO GenAI may unify VLM/LLMPipeline — when that happens, simplify the
-  dual-pipeline routing.
+Nothing here is claude-specific despite the filename. It is a contributor
+convention that happens to also be read by a coding harness.
 
-## Deeper notes — read the relevant one before you touch that area
-
-These are this project's memory files. Keep them current; keep this file thin.
-The docs-toolkit block at the end is managed — edit above or below it,
-never inside.
-
-| File | Read it before touching |
-|---|---|
-| `docs/dev/prefix-cache.md` | caching, KV pool sizing, prewarm, `--idle-timeout`, TTFT logging, `/health`, memory preflight |
-| `docs/dev/tool-calling.md` | `tools` handling, `render_tools_prompt`, `parse_tool_calls`, SSE heartbeat, agent-client quirks |
-| `docs/dev/models.md` | model discovery/naming, `--scan`, weight integrity, `download-model.ps1`, NPU export rule, the verified-model list |
-| `docs/dev/runtime-stacks.md` | installs, dependency pins, which venv runs what, genai vs optimum backend |
-| `docs/dev/moe-offload.md` | `--offload-ratio` and anything XMX-dependent |
-| `docs/dev/machines.md` | which box to run a test on, and which one is off-limits |
-| `TODONT.md` | **anything structural** — it records approaches already rejected, with the reason |
-| `NEXT-STEPS.md` | what is currently open/unresolved |
-| `docs/DIAGRAMS.md` + `docs/*.mmd` | any function a diagram `covers:` — the diagram moves in the same commit, and `.\check-docs.ps1` says which |
-| `docs/` (`MODELS.md`, `API.md`, `DEVICES.md`, `BENCHMARKS.md`, `AGENTS.md`, `INTERNALS.md`) | user-facing behaviour and measured numbers |
-
-## Development preferences
-
-- Read `TODONT.md` before proposing anything structural. Add an entry
-  whenever an approach is abandoned.
-- Keep it simple. One file (`nollama.py`) is fine. Don't split into modules
-  unless it gets unwieldy.
-- PowerShell for install/launch scripts (Windows-native users).
-- Runtime flags over hardcoded config (e.g. `--port`, `--device`).
-- When testing, use small payloads / short prompts. Don't run full model
-  loads unless needed.
-- VLM prompts must be dead simple for small models (3B): one question, one
-  answer, minimal JSON. All logic in Python, not in the prompt.
-- Leading edge, not bleeding edge: nightly-only models don't get installer
-  entries.
-
-## Known issues
-
-- Qwen3 thinking models can exhaust the token budget on `<think>` before
-  producing an answer.
-- Cancel (`/v1/cancel`) relies on OpenVINO invoking the streamer callback.
-  If the native code blocks without yielding, cancel won't take effect and
-  generation completes naturally. Same root cause as the uncancellable
-  prefill in `docs/dev/tool-calling.md`.
-- Chat history is unbounded in the web UI — the user clears with Ctrl+N when
-  a long session approaches MAX_PROMPT_LEN.
-- Tool turns are buffered rather than token-streamed, and big agent prompts
-  prefill slowly on weak iGPUs → `docs/dev/tool-calling.md`.
+---
 
 <!-- docs-toolkit:begin — managed block, edit above or below but not inside -->
 

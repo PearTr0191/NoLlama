@@ -1,6 +1,7 @@
 name: Model Watch
 
-# Polls Hugging Face (OpenVINO + upstream Qwen) for new NoLlama-relevant models
+# Polls Hugging Face (OpenVINO, upstream Qwen, nvidia Nemotron, meta-models
+# Glimmer) for new NoLlama-relevant models
 # and opens a GitHub Issue when something shows up. State lives in
 # scripts/seen_models.json, committed back so you're never re-pinged.
 

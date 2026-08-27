@@ -29,13 +29,6 @@
             "notes": "Tested on 285K NPU: 38.8 tok/s — fastest verified NPU model. NPU-only build (fails CPU/GPU, see model card)."
         },
         {
-            "name": "LFM2 1.2B (INT4-CW)",
-            "hf_id": "aweussom/LFM2-1.2B-int4-cw-ov",
-            "source": "pre-exported",
-            "est_size_gb": 1,
-            "notes": "Tested on 285K NPU: 36.5 tok/s. NPU-only build (fails CPU/GPU, see model card)."
-        },
-        {
             "name": "Phi 3.5 Mini (INT4-CW)",
             "hf_id": "OpenVINO/Phi-3.5-mini-instruct-int4-cw-ov",
             "source": "pre-exported",
@@ -48,20 +41,6 @@
             "source": "pre-exported",
             "est_size_gb": 1,
             "notes": "Tested: works but terrible quality. Smoke-test/dev use only."
-        },
-        {
-            "name": "DeepSeek R1 Distill 7B (INT4-CW)",
-            "hf_id": "OpenVINO/DeepSeek-R1-Distill-Qwen-7B-int4-cw-ov",
-            "source": "pre-exported",
-            "est_size_gb": 4,
-            "notes": "Untested. Marketed as reasoning-focused — verify before relying on it."
-        },
-        {
-            "name": "Mistral 7B v0.3 (INT4-CW)",
-            "hf_id": "OpenVINO/Mistral-7B-Instruct-v0.3-int4-cw-ov",
-            "source": "pre-exported",
-            "est_size_gb": 4,
-            "notes": "Untested."
         }
     ],
     "gpu_vlm": [
@@ -77,14 +56,14 @@
             "hf_id": "OpenVINO/gemma-4-26b-a4b-it-int4-ov",
             "source": "pre-exported",
             "est_size_gb": 15,
-            "notes": "The power pick IF your GPU has XMX (Arc/Lunar Lake — install.ps1 says so above): multimodal MoE, 26.6 tok/s on Arc 140V, 21.0 on a 24-core CPU, 262k context. Will NOT load on non-XMX iGPUs. Verified 2026-08-07, lightly — Qwen3-VL has more mileage."
+            "notes": "The power pick IF your GPU has XMX (Arc/Lunar Lake — install.ps1 says so above): multimodal MoE, 26.6 tok/s on Arc 140V, 21.0 on a 24-core CPU, 262k context. Will NOT load on non-XMX iGPUs. Best of the three Gemma 4 exports and prefix caching works (re-verified 2026-08-21 on Arc Pro B60, loads in ~40s). CAVEAT: its KV is 240 KB/token, so the auto-sized pool lands on its 2 GB floor — about 8k tokens. Pin --cache-size-gb before pointing an agent at it; NoLlama warns at load."
         },
         {
             "name": "Gemma 4 E4B (INT8)",
-            "hf_id": "OpenVINO/gemma-4-E4B-it-int8-ov",
+            "hf_id": "aweussom/gemma-4-E4B-it-int8-ov",
             "source": "pre-exported",
             "est_size_gb": 8,
-            "notes": "Runs on every device class except NPU: 16.4 tok/s on Arc 140V, ~13 on CPU and non-XMX iGPU. Verified 2026-08-07, lightly. Do NOT run on NPU (garbage or 0.1 tok/s — see TODONT.md)."
+            "notes": "Runs on every device class except NPU: 16.4 tok/s on Arc 140V, ~13 on CPU. Reads fine detail its E2B sibling cannot. This is OUR re-export (2026-08-21) — Intel's OpenVINO/gemma-4-E4B-it-int8-ov traced attention decomposed, so it can get NO prefix caching at all; ours has the fused SDPA op, so caching works (~2.6x faster per turn on a repeated agent prompt) with byte-identical answers. Reported upstream. Intel's build is ~2.2x faster on a cold turn, so prefer theirs for one-shot vision."
         },
         {
             "name": "Qwen3.5 4B (INT4)",
@@ -108,46 +87,11 @@
             "notes": "Recommended (proven). INT8 retains fine detail (OCR, numbers) better than INT4. Research license (non-commercial) — see model card."
         },
         {
-            "name": "Qwen3.5 9B (INT4)",
-            "hf_id": "OpenVINO/Qwen3.5-9B-int4-ov",
-            "source": "pre-exported",
-            "est_size_gb": 6,
-            "notes": "Experimental. Qwen3.5 generation, natively multimodal (image-text-to-text) — full VLM on GPU. Untested here; needs OpenVINO 2026.2+."
-        },
-        {
-            "name": "Gemma 3 4B Vision (INT4)",
-            "hf_id": "OpenVINO/gemma-3-4b-it-int4-cw-ov",
-            "source": "pre-exported",
-            "est_size_gb": 3,
-            "notes": "Untested. Google."
-        },
-        {
-            "name": "Gemma 3 12B Vision (INT4)",
-            "hf_id": "OpenVINO/gemma-3-12b-it-int4-ov",
-            "source": "pre-exported",
-            "est_size_gb": 7,
-            "notes": "Untested. Needs ~12 GB RAM with KV cache."
-        },
-        {
             "name": "Gemma 4 E2B Vision (INT4)",
             "hf_id": "OpenVINO/gemma-4-E2B-it-int4-ov",
             "source": "pre-exported",
             "est_size_gb": 4,
-            "notes": "Untested. Google Gemma 4 — efficient (E2B effective-2B) successor to Gemma 3. Needs OpenVINO 2026.2+."
-        },
-        {
-            "name": "InternVL2 4B (INT4)",
-            "hf_id": "OpenVINO/InternVL2-4B-int4-ov",
-            "source": "pre-exported",
-            "est_size_gb": 3,
-            "notes": "Untested. Shanghai AI Lab."
-        },
-        {
-            "name": "Phi 3.5 Vision (INT4)",
-            "hf_id": "OpenVINO/Phi-3.5-vision-instruct-int4-ov",
-            "source": "pre-exported",
-            "est_size_gb": 3,
-            "notes": "Untested. Microsoft."
+            "notes": "Tested 2026-08-21 on Arc Pro B60 (2026.3): loads, prefix caching works, reads large text and colours/shapes correctly. Weakest of the Gemma 4 exports — misreads small glyphs and then claims \"the image is missing\" rather than saying it cannot resolve them, which is a model quirk, not a broken image path. Efficient (E2B = effective-2B) successor to Gemma 3. Needs OpenVINO 2026.2+."
         }
     ],
     "whisper": [
@@ -198,13 +142,6 @@
             "notes": "Great reasoning. Sweet spot."
         },
         {
-            "name": "Qwen3.6 27B (INT4)",
-            "hf_id": "OpenVINO/Qwen3.6-27B-int4-ov",
-            "source": "pre-exported",
-            "est_size_gb": 16,
-            "notes": "Untested. Newest generation, natively multimodal. ~16 GB int4 — borderline on a 16 GB Arc, may fall back to CPU silently like the 30B-A3B. Needs OpenVINO 2026.2+."
-        },
-        {
             "name": "Phi 4 (INT4)",
             "hf_id": "OpenVINO/phi-4-int4-ov",
             "source": "pre-exported",
@@ -217,13 +154,6 @@
             "source": "pre-exported",
             "est_size_gb": 8,
             "notes": "Chain-of-thought specialist."
-        },
-        {
-            "name": "DeepSeek R1 Distill 14B (INT4)",
-            "hf_id": "OpenVINO/DeepSeek-R1-Distill-Qwen-14B-int4-ov",
-            "source": "pre-exported",
-            "est_size_gb": 8,
-            "notes": "Reasoning specialist."
         },
         {
             "name": "Qwen3 30B-A3B MoE (INT4)",
