@@ -60,11 +60,24 @@ Same story for SmolLM3, whose family switch is `/no_think`. Two of the three
 model families in the registry don't speak the dialect we send.
 
 To do:
-1. Find out whether openvino-genai exposes chat-template kwargs on
-   `LLMPipeline`/`VLMPipeline` (does `Tokenizer.apply_chat_template` take
-   `enable_thinking`, and can the serving path reach it?). This gates
-   everything else — if the template is applied inside the pipeline with no
-   hook, the fallback is to render the prompt ourselves.
+1. ~~Find out whether openvino-genai exposes chat-template kwargs~~
+   **RESOLVED 2026-08-24 — yes, on the 2026.3 we already ship.** The hook is
+   `extra_context`: `Tokenizer.apply_chat_template(..., extra_context={...})`
+   and `ChatHistory.set_extra_context({...})`, and the pipelines forward the
+   history's extra_context at generate time. Verified end-to-end on
+   Qwen3.5-4B-int4-ov via `VLMPipeline` on CPU: default spends the whole
+   budget on "Thinking Process:…", `{"enable_thinking": False}` answers
+   directly. Our LLM serving path already builds `ovg.ChatHistory`
+   (`generate_llm`/`stream_llm`) — wiring it there is one
+   `set_extra_context` call. The VLM path still passes a flattened string
+   (no extra_context hook on the `prompt=str` overload); it needs to move to
+   the `generate(ChatHistory, images=...)` overload — verify the
+   `<ov_genai_image_N>` anchor tags still work inside ChatHistory message
+   content before switching. No need to wait for 2026.4.
+   Caveats: upstream #3937 — Qwen3.6-35B-A3B int4 IR renders the pre-closed
+   block but reasons in plain prose anyway (honoring the switch is
+   per-model, so keep the prose fallback); findings queued in
+   openvino-map `PROPOSED_UPDATES.md`.
 2. Route the toggle per model family rather than sending one string to all:
    `enable_thinking=false` (Qwen3.x), `/no_think` (SmolLM3), the
    `Reasoning strength:` line (Glimmer). Keep the prose as the default for
