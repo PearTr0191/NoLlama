@@ -41,6 +41,24 @@ correct and NPU 4 (258V, arch 4000) emits byte-identical garbage** — through
 NPUW knob tried, and Intel's own `LFM2.5-350M-int8-ov`. Same file on CPU/GPU
 in the same venv: correct. SmolLM3/Qwen3 on the same NPU: correct.
 
+## PR #34 (NPU_PLATFORM pin) — author has until 2026-09-01 ~07:00 UTC
+
+Third revision `606b779` was sent back 2026-08-30 18:46 UTC: the commit that
+says it drops the subprocess isolation still contains it (`subprocess.run`,
+`_detect_devices_inproc`, `[RETEST]`, "≈0.3 s" all present), and its merge
+commit's second parent is PR #35's branch, so the PR carries #35's three
+files. The *pin itself* is verified here (Lunar Lake: `NPU_PLATFORM="4000"`
+and `"NPU4000"` both load; `--npu-platform` works; banner shows it).
+
+Decision (owner, 2026-08-30): wait 36 h for a clean branch. If nothing by
+the deadline, write the pin ourselves — `npu_platform` on `DeviceSlot` and
+`OptimumSlot`, the `NPU_PLATFORM` kwarg in `load()` for NPU slots,
+`--npu-platform`, `platform` in `detect_devices()`'s NPU dict, the banner
+suffix, and the `explain_genai_error` hint for `Unsupported platform:
+'AUTO_DETECT'` — in-process detection as on `main`, `nollama.py` only,
+credit PearTr0191 in the commit, close #34 as superseded. Verify with the
+`npu-probe.sh` SmolLM3 control before pushing.
+
 ## Open
 
 - **VLM slots are agent-grade (merged as PR #30 + the prewarm commit).**
