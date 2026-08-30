@@ -1,0 +1,46 @@
+# NoLlama on native Linux. GPU and CPU only — there is no NPU path.
+#
+#   MODELS=/srv/models MODEL=Qwen3-8B-int4-ov docker compose up
+#
+# Models are bind-mounted read-only under their REAL directory name, because
+# that name is what NoLlama serves as the model id. Mounting to a generic
+# path (…:/models/model) would make clients ask for "model".
+#
+# STATUS: the /dev/dri passthrough below is UNTESTED by this project — we
+# have no native-Linux Intel GPU box. Everything else here is measured. On
+# WSL 2 add the override, which IS measured:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.wsl.yml up
+#
+# See DOCKER-INSTALL.md for the numbers and the known defects.
+
+services:
+  nollama:
+    build: .
+    image: nollama:local
+    # Host needs the render group id to match; `stat -c %g /dev/dri/renderD128`
+    # on the host, then set RENDER_GID if it is not 993.
+    group_add:
+      - "${RENDER_GID:-993}"
+    devices:
+      - /dev/dri:/dev/dri
+    ports:
+      - "8000:8000"     # OpenAI API + web UI
+      - "11434:11434"   # Ollama API — omit this and every Ollama client breaks
+    volumes:
+      - ${MODELS:?set MODELS to the host models directory}/${MODEL:?set MODEL to a model directory name}:/models/${MODEL}:ro
+      - nollama-state:/state
+    command:
+      - --model-dir
+      - /models/${MODEL}
+      - --device
+      - GPU
+    # An agent setup wants --idle-timeout 0 (keeps the prefix cache alive and
+    # auto-enables prewarm). Prewarm state must land on the volume, or it dies
+    # with the container:
+    #   command: [--model-dir, /models/${MODEL}, --device, GPU,
+    #             --idle-timeout, "0", --prewarm, /state/prewarm.json]
+    restart: unless-stopped
+
+volumes:
+  nollama-state:

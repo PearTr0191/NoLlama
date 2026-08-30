@@ -1,0 +1,17 @@
+# Serving dependencies for the container image (Dockerfile).
+#
+# This is requirements.txt minus the model-export half. A container never
+# exports and never downloads a model — weights are bind-mounted read-only —
+# so optimum-intel, transformers, accelerate, huggingface_hub and hf_xet are
+# all dead weight in an image, and dropping them keeps it near 1.3 GB.
+#
+# Keep the versions below in step with requirements.txt when that file's
+# runtime pins move. Nothing enforces it; there is no second source of truth
+# worth building for five lines.
+flask
+openvino>=2026.1.0
+openvino-genai>=2026.1.0.0
+openvino-tokenizers>=2026.1.0.0
+pillow>=10.3.0
+numpy>=1.26.4
+soundfile>=0.12.0

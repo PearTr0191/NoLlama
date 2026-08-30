@@ -1,0 +1,22 @@
+# The build context is nollama.py + templates/ + static/ + the requirements
+# file. Everything else is either huge (venvs), irrelevant to serving, or
+# actively unwanted in an image (models, benchmark output).
+venv/
+venv-nightly/
+.git/
+.github/
+.claude/
+bench-results/
+screenshots/
+docs/
+scripts/
+*.ps1
+*.bat
+*.sh
+*.md
+__pycache__/
+*.pyc
+model/
+gpu-model/
+models/
+*.log

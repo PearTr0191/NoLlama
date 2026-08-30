@@ -121,6 +121,7 @@ Setup for both: **[docs/AGENTS.md](docs/AGENTS.md)**.
 | [docs/BENCHMARKS.md](docs/BENCHMARKS.md) | Methodology, all numbers, MoE offload, vs Ollama and OVMS |
 | [docs/AGENTS.md](docs/AGENTS.md) | Copilot and OpenClaw setup |
 | [docs/INTERNALS.md](docs/INTERNALS.md) | Architecture, file layout, known limitations |
+| [docs/DOCKER.md](docs/DOCKER.md) | Running in a container — GPU/CPU only, no NPU; what it costs and the two defects that bite |
 | [docs/DIAGRAMS.md](docs/DIAGRAMS.md) | Logic diagrams of the core flows (request routing, slot lifecycle, token streaming, web UI rendering) — machine-checked against the code, so a diagram that's fallen behind gets flagged, not trusted |
 
 ## Known limitations
@@ -131,6 +132,8 @@ Setup for both: **[docs/AGENTS.md](docs/AGENTS.md)**.
 - Big agent prompts prefill slowly on weak iGPUs. Use a smaller coder model, or
   CPU on a strong desktop.
 - Thinking models can spend their whole token budget in `<think>`.
+- Containers get GPU and CPU, never the NPU — it is not exposed to WSL 2 or
+  to Linux containers on Windows ([docs/DOCKER.md](docs/DOCKER.md)).
 
 The full list, with the reasoning: [docs/INTERNALS.md](docs/INTERNALS.md).
 

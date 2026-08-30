@@ -1,0 +1,30 @@
+# WSL 2 override — the configuration this project actually measured.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.wsl.yml up
+#
+# WSL exposes the GPU as /dev/dxg, not /dev/dri, and the D3D12 shims that
+# Intel's compute-runtime talks to live in /usr/lib/wsl/lib on the host side.
+#
+# LD_LIBRARY_PATH points at those shims. This image sets no LD_LIBRARY_PATH
+# of its own (the pip openvino wheel resolves its libraries by rpath), so a
+# bare value is correct here. If you ever rebase onto an image that DOES set
+# it — openvino/ubuntu24_runtime does — you must append rather than replace,
+# or you lose libopenvino.so and it looks like a broken install.
+#
+# Two WSL-specific facts worth knowing before you file a bug:
+#   - /dev/dxg caps a single GPU allocation at 1 GiB while reporting the
+#     card's full memory as total. NoLlama detects this and passes
+#     GPU_ENABLE_LARGE_ALLOCATIONS; models that need it load ~3x slower.
+#   - Big models stage through host RAM at roughly model size, and WSL takes
+#     ~50% of host RAM by default. Set memory= in %USERPROFILE%\.wslconfig
+#     before loading anything large.
+
+services:
+  nollama:
+    group_add: !override []
+    devices: !override
+      - /dev/dxg:/dev/dxg
+    volumes:
+      - /usr/lib/wsl:/usr/lib/wsl
+    environment:
+      LD_LIBRARY_PATH: /usr/lib/wsl/lib

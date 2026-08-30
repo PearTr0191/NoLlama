@@ -15,11 +15,12 @@ Where this repo lives and where most measurements are taken.
 | NPU | **none** |
 | RAM | 32 GB |
 | OS | Windows 11 Pro 26200 |
-| WSL | installed 2026-08-24, first boot pending |
-| Docker | not installed |
+| WSL | 2.7.12.0, Ubuntu 24.04.4, kernel 6.18.33.2-2 |
+| Docker | Docker Desktop 4.87.0 / engine 29.7.2 |
 
 **The clean Intel GPU test.** No other GPU vendor in play, so an enumeration
-result here is unambiguous.
+result here is unambiguous. Also where the Docker work happens (#31) — the
+container GPU results in `DOCKER-INSTALL.md` are all from this box.
 
 Watch the RAM: 32 GB with ~19-26 GB typically free. Loading a big model
 stages through host RAM at roughly model size, so **one model server at a
@@ -68,7 +69,7 @@ not load.
 | NPU | **Intel AI Boost, present, status OK** |
 | RAM | 63 GB |
 | OS | Windows 11 Pro |
-| WSL | 2.6.3.0, Ubuntu, kernel 6.6.87.2 — already installed |
+| WSL | **2.9.8.0** (pre-release channel), Ubuntu, kernel 6.18.40.1 — includes the WSL Containers preview (`wslc.exe`) |
 | Docker | 29.4.1 — already installed |
 | Ollama | 0.32.14, well stocked (gemma4, muse-glimmer, qwen3-coder-next, …) |
 
@@ -81,9 +82,12 @@ Poor choice for an *Intel GPU* test — the RTX 5090 has populated
 vendors muddy any result.
 
 It is a **working server**. Ollama serves from it and ComfyUI runs the
-graphic-novel work. Ask before mutating it — in particular before
-`wsl --update --pre-release`, which is otherwise low risk and reverts with
-`wsl --update --rollback`.
+graphic-novel work — ask before mutating those.
+
+**WSL there is fair game**, granted 2026-08-24: the owner does not use WSL on
+this box (that happens on the laptop), so WSL experiments do not need asking
+each time. That is how it reached the pre-release channel for the B2 test.
+Ollama, ComfyUI and the drivers are still ask-first.
 
 ## 3. The 258V laptop — DO NOT TOUCH WSL
 

@@ -60,3 +60,33 @@ macOS is untested. On Linux, NPU and GPU detection needs the Intel
 userspace drivers installed (`intel-npu-driver` for the NPU, the GPU
 compute runtime for the iGPU) — without them only the CPU shows up. The
 NPU Linux stack is less battle-tested than Windows.
+
+## In a container, or through WSL
+
+Not a supported configuration yet — the measurements behind this section
+are in `DOCKER-INSTALL.md` (issue #31). Two things are worth knowing if you
+try it anyway.
+
+**Intel's own `openvino/ubuntu24_runtime` image may not see your GPU.** It
+carries whatever compute-runtime it was built against, and a driver that
+predates your card enumerates nothing at all — `CPU` only, no error worth
+the name. Install the current release from
+[intel/compute-runtime](https://github.com/intel/compute-runtime/releases)
+into your image and check `available_devices` before believing anything
+else.
+
+**A GPU reached through WSL's `/dev/dxg` caps a single allocation at
+1 GiB**, while still reporting the card's full memory as its total. Any
+model with a tensor over that size — Gemma 4 E2B's per-layer embedding
+table is 2.2 GB — fails at load with "Exceeded max size of memory object
+allocation". NoLlama detects the mismatch (max-alloc below total budget)
+and passes `GPU_ENABLE_LARGE_ALLOCATIONS`, printing a line when it does.
+Models that need the hint load roughly 3x slower than native; models that
+fit under the cap run at native speed. Native installs never see this —
+they report the whole budget as allocatable and take no hint.
+
+Correctness is not implied by either of those working. One model measured
+so far — `gemma-4-26b-a4b-it-int4-ov` — loads cleanly on the container GPU
+path and then generates deterministic gibberish, while being correct
+natively, correct on CPU in the same container, and while every other model
+tried on that path was correct. Check the output, not the device list.
