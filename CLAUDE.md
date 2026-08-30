@@ -16,7 +16,10 @@ OpenAI-compatible LLM/VLM server for Intel hardware. NPU-first.
 - Prefix (KV) caching is **default on** for GPU/CPU **LLM and VLM** slots;
   NPU keeps the plain pipeline. → `docs/dev/prefix-cache.md`
 - Tool calling works on **GPU/iGPU + CPU only, never the NPU**, on both LLM
-  and VLM slots. → `docs/dev/tool-calling.md`
+  and VLM slots. Tool turns stream on the OpenAI endpoint, gated at the
+  tool-call opener (`_ToolCallGate`); `<think>` spans travel as
+  `reasoning_content` (`_ThinkSplitter`; `--think-in-content` restores the
+  old shape). → `docs/dev/tool-calling.md`
 - Most models run on openvino_genai; a few need optimum-intel's python
   runtime (`--backend`). → `docs/dev/runtime-stacks.md`
 - `models.json` — curated model registry (npu, gpu_vlm, gpu_llm, whisper).
@@ -78,8 +81,9 @@ never inside.
   prefill in `docs/dev/tool-calling.md`.
 - Chat history is unbounded in the web UI — the user clears with Ctrl+N when
   a long session approaches MAX_PROMPT_LEN.
-- Tool turns are buffered rather than token-streamed, and big agent prompts
-  prefill slowly on weak iGPUs → `docs/dev/tool-calling.md`.
+- Big agent prompts prefill slowly on weak iGPUs; the Ollama surface still
+  buffers tool turns (the OpenAI endpoint streams them since 2026-08-30)
+  → `docs/dev/tool-calling.md`.
 
 <!-- docs-toolkit:begin — managed block, edit above or below but not inside -->
 

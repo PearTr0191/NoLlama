@@ -1,10 +1,11 @@
 %% Request routing and generation-path selection, both API surfaces.
 %% Drawn 2026-08-19 from nollama.py @ 85e796f (source read, paths verified in code).
+%% Updated 2026-08-30: tool turns stream (issue #36); _sse_replay removed, _assistant_message added.
 %% Legend: solid = normal path, dashed = refused/degraded path,
 %%         ALL-CAPS nodes = prose annotations.
 %% Palette: route (blue) = request handling, gen (green) = generation paths,
 %%          client (yellow) = client-visible surfaces, warn (orange) = annotations.
-%% covers: nollama.py:chat_completions,ollama_chat,ollama_generate,ollama_v1_chat_completions,parse_messages,_route_request,_tools_supported,prepare_messages_for_tools,_maybe_capture_prewarm,_sse_tool_stream,_sse_replay,parse_tool_calls
+%% covers: nollama.py:chat_completions,ollama_chat,ollama_generate,ollama_v1_chat_completions,parse_messages,_route_request,_tools_supported,prepare_messages_for_tools,_maybe_capture_prewarm,_sse_tool_stream,_assistant_message,parse_tool_calls
 flowchart TB
   openai_client["OpenAI client<br/>POST /v1/chat/completions<br/>(port 8000 or 11434)"]
   ollama_client["Ollama client<br/>POST /api/chat | /api/generate"]
@@ -22,8 +23,8 @@ flowchart TB
 
   stream_llm["stream_llm<br/>SSE tokens + keepalive"]
   stream_vlm["stream_vlm<br/>SSE tokens (VLM)"]
-  _sse_tool_stream["_sse_tool_stream<br/>buffered generation + SSE pings,<br/>then _sse_replay of parsed result"]
-  generate_blocking["generate_llm / generate_vlm<br/>blocking JSON reply"]
+  _sse_tool_stream["_sse_tool_stream<br/>token-streamed: reasoning_content live,<br/>content live until _ToolCallGate sees an<br/>opener; the held text goes to parse_tool_calls"]
+  generate_blocking["generate_llm / generate_vlm<br/>blocking JSON reply via _assistant_message<br/>(think span -> reasoning_content)"]
   parse_tool_calls["parse_tool_calls<br/>Qwen3 XML, Hermes, ATEM, bare function=,<br/>Mistral, Llama, DeepSeek, bare-JSON fallback"]
 
   openai_client --> chat_completions
@@ -56,13 +57,15 @@ flowchart TB
   _sse_tool_stream --> parse_tool_calls
   generate_blocking -->|tools active| parse_tool_calls
 
-  BUFFERED["TOOL TURNS ARE BUFFERED: a structured tool_calls delta
-  needs the whole generation first. _sse_tool_stream runs generate in a
-  background thread and pings every HEARTBEAT_SECS so a minutes-long
-  prefill does not trip client idle watchdogs (Copilot/OpenClaw abort
-  ~120s) - and an aborted client leaves OpenVINO churning: prefill
-  cannot be cancelled."]
-  _sse_tool_stream -.-> BUFFERED
+  GATED["TOOL TURNS STREAM (2026-08-30, issue #36): reasoning and answer
+  text go out token by token; only the tool-call block is held, because
+  a structured tool_calls delta needs it parsed whole. Agent clients
+  send tools on EVERY request, so the old whole-turn buffering meant
+  they never saw a live token. Keep-alive pings every HEARTBEAT_SECS
+  still cover a minutes-long prefill (Copilot/OpenClaw abort ~120s) -
+  and an aborted client leaves OpenVINO churning: prefill cannot be
+  cancelled. The Ollama surface keeps its buffered tool turn."]
+  _sse_tool_stream -.-> GATED
 
   NPUGATE["NPU never gets tools: hard MAX_PROMPT_LEN cap and NPU-class
   models cannot drive agent loops. /api/show advertises the tools
@@ -77,4 +80,4 @@ flowchart TB
   class chat_completions,ollama_chat,ollama_generate,ollama_v1_chat_completions,parse_messages,_route_request,_tools_supported,prepare_messages_for_tools,_maybe_capture_prewarm,pathpick route
   class stream_llm,stream_vlm,_sse_tool_stream,generate_blocking,parse_tool_calls gen
   class openai_client,ollama_client,refuse400,refuse503 client
-  class BUFFERED,NPUGATE warn
+  class GATED,NPUGATE warn

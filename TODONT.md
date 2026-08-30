@@ -724,6 +724,62 @@ Re-evaluate if: a newer NPU driver or openvino release changes either half
 timing), or Intel publishes a fast LFM int8 NPU build — read its rt_info
 for the recipe before assuming ours was wrong.
 
+## LFM2 / LFM2.5 on the Lunar Lake NPU 4 (2026-08-30)
+
+Idea: the two LFM builds are the fastest NPU models we publish (38.8 /
+36.5 tok/s on the 285K), and Lunar Lake laptops are NoLlama's flagship
+target — so offer them there too. The installer already did.
+
+**Verdict:** don't recommend either LFM build on NPU 4 until the numerics
+are fixed. They run at 46–48 tok/s and emit word salad. Registry notes and
+`docs/MODELS.md` say "NPU 3 only".
+
+**Why not (258V laptop, `DEVICE_ARCHITECTURE=4000`, driver 32.0.100.4778):**
+- `aweussom/LFM2.5-1.2B-Instruct-int4-cw-ov`: `Say hello.` →
+  `cohclclclcl…`, `What is 2+2?` → `an anthankankank…`, `capital of Norway`
+  → `ablelelele…`. Deterministic — byte-identical across OpenVINO
+  **2026.3.0, 2026.3.1 and the 2026.5.0 nightly**, with the **plugin
+  compiler and the driver compiler** (`NPU_COMPILER_TYPE=DRIVER`) alike, and
+  under every NPUW knob tried (`MAX_PROMPT_LEN` 1024/4096,
+  `GENERATE_HINT=BEST_PERF`, `PREFILL_HINT=DYNAMIC`). Never emits EOS, so
+  every request runs to `max_tokens`.
+- It is the architecture, not our export: Intel's own
+  `OpenVINO/LFM2.5-350M-int8-ov` is garbage on the same NPU
+  (`Tong、/神可乱 … shove shove shove`), `aweussom/LFM2-1.2B-int4-cw-ov` is
+  degenerate, and a fresh export with the 2026.5 toolchain (new IR) is
+  garbage of a different flavour. The 350M file on **CPU and GPU in the same
+  venv** answers `Hello! How can I help you today?` / `2 + 2 = 4` / `Oslo`.
+- **Positive control:** the 285K (NPU 3, arch 3720), same driver 4778, same
+  OpenVINO 2026.3.0, same two files — correct with both compilers. With
+  software held constant, the NPU generation is the only variable left.
+- Not the device: SmolLM3-3B-int8-cw and Qwen3-8B-int4-cw are coherent on
+  the same NPU in the same session.
+- Precedent, mirror image: Gemma 4 E4B int8 was garbage on NPU 3 and coherent
+  on NPU 4 (entry above). Per-generation numerical bugs in the NPU stack for
+  non-standard blocks (LFM2's short-conv layers here) are a pattern.
+- Upstream already sees it: in openvinotoolkit/openvino#37322 an Intel
+  engineer reproduced "LFM2.5-1.2B on NPU gives gibberish, CPU/GPU fine" on
+  2026.3 / Lunar Lake (2026-08-13). The nightly that fixed the reporters'
+  *2.6B new-IR* models does not fix ours; the 2026.3.1 notes' "fixed accuracy
+  issue for lfm2-1.2b … NPU" did not hold on this NPU 4 either.
+- The 2026.3.1 runtime **segfaults** (exit 139, reproducible) when handed an
+  IR exported by the 2026.5 toolchain — separate hazard, same day: a newer
+  IR is not a drop-in on an older runtime.
+
+**Still open — the one axis not varied:** every failing run shared the
+**4778 kernel driver/firmware**. Driver 32.0.100.5540 is installed
+(pnputil, `oem43.inf`) but a reboot is needed before a process sees it
+(`NPU_DRIVER_VERSION` still reads 1004778). Correct after the reboot →
+4778 runtime bug on NPU 4, fix = "update your NPU driver", then bisect
+down through the staged 4724/4512. Still garbage → hardware/firmware path,
+report the whole matrix to #37322. Commands are at the top of
+`NEXT-STEPS.md`; the full log is `C:\Users\tommyl\npu-driver-backup\FINDINGS.md`.
+
+Re-evaluate if: the post-reboot probe is correct; an NPU driver or
+OpenVINO release names LFM2 on NPU4000; or Intel publishes an LFM2 build
+validated on Lunar Lake. Retest is `npu-probe.sh LFM2.5-1.2B-Instruct-int4-cw-ov`
+(two minutes) plus the SmolLM3 control.
+
 ## Qwen3.6-35B-A3B (Qwen3.5-MoE arch) on the NPU (2026-08-06)
 
 Idea: with OpenVINO 2026.3 passing regression, put the new Qwen3.6-35B-A3B
@@ -913,6 +969,18 @@ being about Qwen3.8 (a plain `requirements.txt` bump serves it) and is only
 worth keeping if a *new* pre-runtime model has taken its place. If none
 has, delete `-Nightly` and `requirements-nightly.txt` rather than
 maintaining an unused path.
+
+**Update 2026-08-30 — the release arrived early, as 2026.3.1 (2026-08-26),
+and the bump happened.** Its notes list Qwen3.8-27B and Muse-Glimmer-30B as
+"functionally enabled"; both verified here on the Arc 140V with the
+2026.3.1 wheels (Qwen3.8 3.6–4.8 tok/s, Glimmer ~2.5 tok/s, both correct),
+so `requirements.txt` floors are now `>=2026.3.1` and both are back in
+`models.json` — Qwen3.8 pinned to the repo's **`2026.3.1` branch**, because
+its `main` branch is a 2026.4-toolchain export that segfaults the 2026.3.x
+runtime at load (`revision` field in the registry, `--revision` in the
+downloaders). `-Nightly` stays for now as the *testing* path — it is how the
+LFM2-on-NPU-4 bug was shown to persist into 2026.5 the same day — not as a
+way to ship models; nothing in the registry needs it.
 ## `--offload-ratio` on a discrete GPU that fits the model (2026-08-18)
 
 Idea: the Arc Pro B60 has XMX, and TODONT/README already record offload as a

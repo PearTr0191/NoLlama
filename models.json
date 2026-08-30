@@ -26,7 +26,7 @@
             "hf_id": "aweussom/LFM2.5-1.2B-Instruct-int4-cw-ov",
             "source": "pre-exported",
             "est_size_gb": 1,
-            "notes": "Tested on 285K NPU: 38.8 tok/s — fastest verified NPU model. NPU-only build (fails CPU/GPU, see model card)."
+            "notes": "Tested on 285K NPU (NPU 3, Arrow Lake): 38.8 tok/s — fastest verified NPU model. NPU-only build (fails CPU/GPU, see model card). WARNING: on Lunar Lake (Core Ultra 200V, NPU 4) it produces word salad at full speed — driver 32.0.100.4778, OpenVINO 2026.3.0/2026.3.1/2026.5-nightly all alike, Intel's own LFM2.5 exports too (verified 2026-08-30; see TODONT). Arrow Lake / Meteor Lake NPUs only until that is fixed."
         },
         {
             "name": "Phi 3.5 Mini (INT4-CW)",
@@ -44,6 +44,21 @@
         }
     ],
     "gpu_vlm": [
+        {
+            "name": "Qwen3.8 27B (INT4)",
+            "hf_id": "OpenVINO/Qwen3.8-27B-int4-ov",
+            "revision": "2026.3.1",
+            "source": "pre-exported",
+            "est_size_gb": 15,
+            "notes": "Needs OpenVINO 2026.3.1+ (the 2026.3.1 release enabled it; install.ps1 pulls it). Pinned to the repo's 2026.3.1 branch on purpose: its main branch is a 2026.4-toolchain export that SEGFAULTS the 2026.3.x runtime at load. Verified 2026-08-30 on Arc 140V (2026.3.1 release): correct answers, 3.6-4.8 tok/s — dense 27B, so the 15 GB must be resident (24 GB card, or a raised iGPU shared-memory budget) and --offload-ratio does nothing. Quality over speed; a 24-core CPU is ~2-3 tok/s. Template pre-seeds <think>; NoLlama detects that at load."
+        },
+        {
+            "name": "Muse Glimmer 30B (INT4)",
+            "hf_id": "OpenVINO/Muse-Glimmer-30B-int4-ov",
+            "source": "pre-exported",
+            "est_size_gb": 17,
+            "notes": "Intel's official export (2026-08-12), enabled in the OpenVINO 2026.3.1 release. Lands on a VLM slot with tool calling + prefix caching. Verified 2026-08-30 on Arc 140V (2026.3.1): quotes the instruction back verbatim, answers correctly, ~2.5 tok/s (17 GB on a shared-memory iGPU); ~14 tok/s on an Arc Pro B60. The Xe2/Xe3 GPU corruption seen 2026-08 was the optimum path only — this GenAI path was never affected. Always reasons by default; the web UI's 'Just answer me' trims it."
+        },
         {
             "name": "Qwen3-VL 8B (INT8)",
             "hf_id": "OpenVINO/Qwen3-VL-8B-Instruct-int8-ov",

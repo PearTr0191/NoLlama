@@ -32,8 +32,8 @@ All are in the `install.ps1` menu, with measured numbers on real hardware:
 |---|---|---|
 | [`SmolLM3-3B-int4-cw-ov`](https://huggingface.co/aweussom/SmolLM3-3B-int4-cw-ov) | 23.3 tok/s | New in OpenVINO 2026.3; also runs GPU (29.7) / CPU (37.5) |
 | [`SmolLM3-3B-int8-cw-ov`](https://huggingface.co/aweussom/SmolLM3-3B-int8-cw-ov) | 12.3 tok/s | Quality-first variant; ~half the speed of int4-cw |
-| [`LFM2.5-1.2B-Instruct-int4-cw-ov`](https://huggingface.co/aweussom/LFM2.5-1.2B-Instruct-int4-cw-ov) | **38.8 tok/s** | Fastest model we've verified on an NPU. NPU-only build |
-| [`LFM2-1.2B-int4-cw-ov`](https://huggingface.co/aweussom/LFM2-1.2B-int4-cw-ov) | 36.5 tok/s | NPU-only build |
+| [`LFM2.5-1.2B-Instruct-int4-cw-ov`](https://huggingface.co/aweussom/LFM2.5-1.2B-Instruct-int4-cw-ov) | **38.8 tok/s** | Fastest model we've verified on an NPU. NPU-only build. **NPU 3 only** — see below |
+| [`LFM2-1.2B-int4-cw-ov`](https://huggingface.co/aweussom/LFM2-1.2B-int4-cw-ov) | 36.5 tok/s | NPU-only build. **NPU 3 only** — see below |
 | [`Qwen2.5-VL-3B-Instruct-int8-ov`](https://huggingface.co/aweussom/Qwen2.5-VL-3B-Instruct-int8-ov) | — (GPU VLM) | The proven small vision model, now a download instead of a 10-min conversion. Research license |
 | [`LFM2-8B-A1B-int4-ov`](https://huggingface.co/aweussom/LFM2-8B-A1B-int4-ov) | — (GPU MoE) | 87 tok/s resident on an Arc 140V; the disk-offload test model |
 
@@ -42,6 +42,16 @@ group-quantized int4 that `optimum-cli` produces crashes the Intel NPU
 driver compiler (a known vpux bug — `"Found N duplicated names"`). If you
 convert your own models for the NPU, use `download-model.ps1 -Weight
 int4-cw` (or `int8-cw`), which encodes the working recipe.
+
+**The two LFM builds are NPU 3 only (Arrow Lake / Meteor Lake) as of
+2026-08-30.** On a Lunar Lake NPU 4 (Core Ultra 7 258V) the same files run
+at 46–48 tok/s and emit word salad — `Say hello.` → `cohclclclcl…`,
+byte-identical across OpenVINO 2026.3.0, 2026.3.1 and the 2026.5 nightly,
+with the plugin compiler and the driver compiler alike; Intel's own
+`OpenVINO/LFM2.5-350M-int8-ov` fails the same way, and the same file on
+CPU/GPU in the same venv answers correctly. The 285K's NPU 3 runs them
+correctly with identical software. Upstream: openvinotoolkit/openvino#37322.
+Details and the still-open driver-runtime question in `TODONT.md`.
 
 ## Models
 
@@ -280,9 +290,12 @@ agent-loop-grade.
 
 What to know before switching:
 
-- Needs the **nightly runtime** (`install.ps1 -Nightly`) until OpenVINO
-  2026.4 ships as a release — Intel exported it with a 2026.4 build and the
-  card wants 2026.3.1+ with a genai pre-release. Same gate as Qwen3.8-27B.
+- Needs **OpenVINO 2026.3.1 or newer** — the 2026.3.1 release (2026-08-26)
+  is where Intel lists it as functionally enabled, and `requirements.txt`
+  now floors there. Verified on the Arc 140V with the release wheels
+  (2026-08-30): quotes the instruction back verbatim, ~2.5 tok/s with 17 GB
+  of weights in shared memory — chat-grade on an iGPU, agent-grade on a
+  B60 (~14 tok/s). It is in the `install.ps1` menu as of the same day.
 - It lands on a **VLM slot** — which since 2026-08-18 means **tool calling
   works** (structured `tool_calls` on both API surfaces, verified with
   Glimmer on the B60) and **prefix caching works** (VLMPipeline honors
@@ -411,15 +424,27 @@ host. Note Glimmer *always* reasons by default (`reasoning_strength`
 defaults to high in its template); the web UI's no-think toggle sends its
 native `Reasoning strength: low.` directive.
 
-## Models that need the OpenVINO nightly runtime (`-Nightly`)
+## Qwen3.8-27B: a release model since 2026.3.1 — pinned to a repo branch
 
-The mirror image of the section above: sometimes Intel publishes a working
-OpenVINO IR *before* the runtime that can read it ships. As of 2026-08
-that's **Qwen3.8-27B** — [`OpenVINO/Qwen3.8-27B-int4-ov`](https://huggingface.co/OpenVINO/Qwen3.8-27B-int4-ov),
-published 2026-08-14, which needs OpenVINO **2026.4.0-nightly** and an
-openvino-genai nightly from 2026-08-14 or later. Nothing in NoLlama needs
-changing to serve it (`is_vlm` already recognises the Qwen3.5-style
-three-file vision export); only the wheels do.
+[`OpenVINO/Qwen3.8-27B-int4-ov`](https://huggingface.co/OpenVINO/Qwen3.8-27B-int4-ov)
+spent two weeks needing a nightly runtime; OpenVINO **2026.3.1**
+(2026-08-26) lists it as functionally enabled and it is back in the
+`install.ps1` menu. One trap the menu handles for you: the repo's **`main`
+branch is a 2026.4-toolchain export that segfaults the 2026.3.x runtime at
+load** (no error, the process just dies); the IR that matches the release
+lives on the **`2026.3.1` branch**, so the registry entry carries
+`"revision": "2026.3.1"` and `download-model.ps1` takes `-Revision`. Verified
+2026-08-30 on the Arc 140V with the release wheels: correct answers,
+**3.6–4.8 tok/s** — a dense 27B on an iGPU is quality-over-speed. Its chat
+template opens the `<think>` block itself; NoLlama detects that at load so
+reasoning still arrives as `reasoning_content`.
+
+## The OpenVINO nightly runtime (`-Nightly`) — a test harness, not a model gate
+
+Sometimes Intel publishes a working OpenVINO IR *before* the runtime that
+can read it ships (Qwen3.8 above was the 2026-08 case). Nothing in the
+registry needs a nightly today; `-Nightly` remains the way to ask "does the
+next runtime fix X?" without touching the venv you serve from.
 
 ```powershell
 .\install.ps1 -Nightly     # builds venv-nightly/, leaves venv/ alone
@@ -439,27 +464,24 @@ generated `start.ps1`, so a machine can hold both and launch either. The
 install prints the exact wheel versions it landed on — quote those in any
 bug report, because "openvino nightly" is not a reproducible statement.
 
-Registry models needing this stack carry `"requires_nightly": true` in
-`models.json` and are **hidden from the normal menus** (the menu says how
-many, and how to see them). Offering a 16 GB download that then fails to
-load is worse than not offering it.
+A registry model that ever needs this stack again carries
+`"requires_nightly": true` in `models.json` and is **hidden from the normal
+menus** (the menu says how many, and how to see them). Offering a 16 GB
+download that then fails to load is worse than not offering it.
 
-Know what you are signing up for before you pull 15.7 GB:
+Know what you are signing up for before you pull Qwen3.8's 15 GB:
 
-- Intel labels the export **experimental / "not fully validated with
-  OpenVINO"**, and nightly wheels change daily.
-- It is a **VLM**, so it lands on `VLMPipeline`. Prefix caching now works
-  on VLM slots (verified 2026-08-18 on 2026.3 release and the 2026.4
+- It is a **VLM**, so it lands on `VLMPipeline`. Prefix caching works on
+  VLM slots (verified 2026-08-18 on 2026.3 release and the 2026.4
   nightly), so agent turns reuse the prefilled system prompt — and prewarm
   covers VLM slots too, so after the first captured run even a restart's
   first turn is a cache hit.
 - It is **dense**, not MoE, so `--offload-ratio` does nothing for it. The
-  15.7 GB of weights must be resident.
+  15 GB of weights must be resident.
 - That rules out a stock 16 GB Arc 140V. It wants a 24 GB card (Arc B60)
-  or a raised shared-memory budget.
+  or a raised shared-memory budget (the 140V run above used a 25 GB
+  override).
 - `venv-nightly/` pins `transformers==5.2` per Intel's model card, which
   is the opposite of `requirements.txt`'s `<5` cap — so **Qwen3-Next
   conversions must still run from `venv/`**.
-
-Untested here as of this writing; the Arc B60 run is the verdict.
 

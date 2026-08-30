@@ -126,8 +126,8 @@ Setup for both: **[docs/AGENTS.md](docs/AGENTS.md)**.
 ## Known limitations
 
 - NPU prompts cap at 4096 tokens; no vision, no tool-calling there.
-- Tool-enabled turns are buffered, not token-streamed (SSE keep-alives stop
-  clients timing out).
+- On the Ollama API, tool-enabled turns are still buffered (the OpenAI
+  endpoint streams them, gated at the tool-call block).
 - Big agent prompts prefill slowly on weak iGPUs. Use a smaller coder model, or
   CPU on a strong desktop.
 - Thinking models can spend their whole token budget in `<think>`.

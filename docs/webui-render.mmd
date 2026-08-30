@@ -1,10 +1,11 @@
 %% Web UI streaming render: SSE loop, think-block states, XSS layering, pinned scroll.
 %% Drawn 2026-08-19 from static/js/app.js @ 85e796f.
+%% Updated 2026-08-30: reasoning_content deltas re-tagged by appendDelta/closeThink.
 %% Legend: solid = normal path, dashed = edge/abort paths,
 %%         ALL-CAPS nodes = prose annotations.
 %% Palette: route (blue) = event/state handling, gen (green) = rendering,
 %%          client (yellow) = user-visible, warn (orange) = annotations.
-%% covers: static/js/app.js:sendMessage,justAnswerMe,updateStreamBubble,attachThinkScroll,syncAnswerNodes,resetStreamState,renderMarkdown,renderThinkingBlock,mdEscapeAndRender,mdInline,escapeHtml,escapeAttr,safeUrl,buildRequestBody,addMessage
+%% covers: static/js/app.js:sendMessage,justAnswerMe,appendDelta,closeThink,updateStreamBubble,attachThinkScroll,syncAnswerNodes,resetStreamState,renderMarkdown,renderThinkingBlock,mdEscapeAndRender,mdInline,escapeHtml,escapeAttr,safeUrl,buildRequestBody,addMessage
 flowchart TB
   sendMessage["sendMessage<br/>push user turn, POST /v1/chat/completions,<br/>read SSE; dropUserMsg on failure the<br/>model never saw"]
   justAnswerMe["justAnswerMe<br/>abort + /v1/cancel, retry last user turn<br/>with NO_THINK_PROMPT"]
@@ -12,8 +13,9 @@ flowchart TB
 
   sendMessage --> buildRequestBody
   justAnswerMe --> buildRequestBody
-  sendMessage --> sse["SSE read loop<br/>split on newline, keep partial line,<br/>accumulate fullText"]
-  sse --> updateStreamBubble
+  sendMessage --> sse["SSE read loop<br/>split on newline, keep partial line,<br/>every delta through appendDelta,<br/>accumulate fullText"]
+  sse --> appendDelta["appendDelta / closeThink<br/>delta.reasoning_content opens a live<br/>think block, delta.content closes it;<br/>the renderer keeps keying on literal tags"]
+  appendDelta --> updateStreamBubble
 
   updateStreamBubble{"updateStreamBubble<br/>does a .think-full node exist?"}
   updateStreamBubble -->|"yes: swap innerHTML of the SAME
@@ -21,7 +23,7 @@ flowchart TB
   updateStreamBubble -->|"no: full re-render, then"| attachThinkScroll["attachThinkScroll<br/>rebind scroll listener to the<br/>recreated node; 'pinned' lives on<br/>streamState, not in the closure"]
   syncAnswerNodes -->|"pinned: re-pin to tail;<br/>freed: leave position"| renderMarkdown
   attachThinkScroll --> renderMarkdown
-  sse -.->|"stream done"| finalRender["renderMarkdown(fullText, false)<br/>collapses the think block;<br/>resetStreamState"]
+  sse -.->|"stream done: closeThink, then"| finalRender["renderMarkdown(fullText, false)<br/>collapses the think block;<br/>resetStreamState"]
 
   renderMarkdown{"renderMarkdown<br/>think-block state"}
   renderMarkdown -->|"thinkMatch: paired tags"| renderThinkingBlock
@@ -60,10 +62,18 @@ flowchart TB
   a non-thinking model's whole reply."]
   renderMarkdown -.-> SETTLE
 
+  RETAG["WHY RE-TAG INSTEAD OF A SECOND RENDER INPUT: the server moved
+  reasoning to delta.reasoning_content (2026-08-30, issue #36) for
+  agent clients; the UI's four think states, sticky scroll and the
+  just-answer button all key on literal tags in fullText, so folding
+  the field back into tags keeps one code path. A model that still
+  emits raw tags in content renders unchanged."]
+  appendDelta -.-> RETAG
+
   classDef route fill:#e6f0ff,stroke:#0066cc,color:#000
   classDef gen fill:#e6ffe6,stroke:#00b300,color:#000
   classDef client fill:#ffffcc,stroke:#b3b300,color:#000
   classDef warn fill:#fec,stroke:#a60,color:#000
-  class sendMessage,justAnswerMe,buildRequestBody,sse,updateStreamBubble,attachThinkScroll,syncAnswerNodes route
+  class sendMessage,justAnswerMe,buildRequestBody,sse,appendDelta,updateStreamBubble,attachThinkScroll,syncAnswerNodes route
   class renderMarkdown,renderThinkingBlock,mdEscapeAndRender,mdInline,safeUrl,finalRender gen
-  class XSS,ONCE,SETTLE warn
+  class XSS,ONCE,SETTLE,RETAG warn

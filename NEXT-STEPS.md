@@ -3,6 +3,44 @@
 State after the 2026-08-18 merge. Anything settled lives in README, TODONT or
 the docs — this file is only what's still open.
 
+## Pending a reboot of the 258V laptop — LFM2 garbage on NPU 4
+
+NPU driver **32.0.100.5540** is installed (pnputil, `oem43.inf`, exit 3010)
+but the kernel driver + firmware swap waits for a reboot; every process still
+reports `NPU_DRIVER_VERSION=1004778`. Do not reboot for it — the WSL2 project
+comes first. When the laptop does reboot anyway, run this **first** (Git Bash,
+no admin):
+
+```bash
+cd /c/devel/aweussom/python/NoLlama
+./venv/Scripts/python.exe -c "import openvino as ov; print(ov.Core().get_property('NPU','NPU_DRIVER_VERSION'))"   # expect 1005540
+PYTHONIOENCODING=utf-8 ./venv/Scripts/python.exe /c/Users/tommyl/npu-driver-backup/compiler-probe.py C:/Users/tommyl/models/LFM2.5-1.2B-Instruct-int4-cw-ov
+bash /c/Users/tommyl/npu-driver-backup/npu-probe.sh SmolLM3-3B-int8-cw-ov control   # NPU still healthy?
+```
+
+Read it as:
+- `Hello!`-type answers → the garbage was a **4778 runtime bug on NPU 4**; the
+  fix for users is "update the NPU driver". Then bisect downward to find the
+  first good driver: elevated pwsh 7,
+  `C:\Users\tommyl\npu-driver-backup\rollback-npu-driver.ps1 -Target 32.0.100.4724`
+  (and `.4512`), probe again after each.
+- still `cohclclcl…` → **NPU 4 is wrong for LFM2 regardless of driver**;
+  report the full matrix to openvinotoolkit/openvino#37322 (Intel already
+  reproduced "LFM2.5-1.2B gibberish on NPU" there on 2026-08-13).
+
+Either way, afterwards: TODONT entry, `models.json` + `docs/MODELS.md` caveat
+on the two LFM builds ("verified NPU 3 only"), the two HF model cards, and a
+reply on issue #24. To go back to the shipped driver:
+`rollback-npu-driver.ps1` (no args) — 4778 is still staged and backed up.
+
+What is already established (2026-08-30, full log in
+`C:\Users\tommyl\npu-driver-backup\FINDINGS.md`): with OpenVINO 2026.3.0,
+driver 4778 and the same files held constant, **NPU 3 (285K, arch 3720) is
+correct and NPU 4 (258V, arch 4000) emits byte-identical garbage** — through
+2026.3.0, 2026.3.1, the 2026.5.0 nightly, plugin *and* driver compiler, every
+NPUW knob tried, and Intel's own `LFM2.5-350M-int8-ov`. Same file on CPU/GPU
+in the same venv: correct. SmolLM3/Qwen3 on the same NPU: correct.
+
 ## Open
 
 - **VLM slots are agent-grade (merged as PR #30 + the prewarm commit).**
@@ -141,21 +179,24 @@ the docs — this file is only what's still open.
   ~78 MB/s. Also leaves an abandoned partial in `.cache/huggingface/download`
   that has to be deleted by hand (17 GB of files, 28.7 GB on disk until then).
 
-- **Glimmer into `install.ps1`/`models.json`: waits for OpenVINO 2026.4 as a
-  *release*.** Standing rule: leading edge, not bleeding edge. The GenAI
-  reroute works on the 2026.4 nightly, but a menu item that needs a nightly
-  wheel is bleeding. When 2026.4 releases, the entry is Intel's
-  `OpenVINO/Muse-Glimmer-30B-int4-ov` with `"requires_nightly"` dropped —
-  the manual path until then is `install.ps1 -Nightly` plus a hand
-  download (`install-optimum.ps1` is no longer the recommended Glimmer
-  path, only the `--backend optimum` fallback). Docs may say we know it
-  will work; the installer may not act on it.
-
-  **Qwen3.8 27B rides the same gate** (removed from `models.json`
-  2026-08-21). It had a menu entry carrying `requires_nightly: true`, which
-  contradicted this very rule; the rule wins. Re-add
-  `OpenVINO/Qwen3.8-27B-int4-ov` when 2026.4 ships as a release — and test
-  it first, since it was never run here.
+- **Glimmer and Qwen3.8 are back in the menu (2026-08-30)** — the gate was
+  OpenVINO shipping them in a *release*, and 2026.3.1 (2026-08-26) did.
+  Both verified on the Arc 140V with the release wheels; `requirements.txt`
+  floors are `>=2026.3.1`; Qwen3.8 is pinned to its `2026.3.1` repo branch
+  (see TODONT, "nightly stack in the default install"). Still open from that:
+  - **B60 numbers on 2026.3.1** for both — the 140V figures (Qwen3.8 3.6–4.8
+    tok/s, Glimmer ~2.5) are iGPU-bound and say nothing about the card users
+    will actually buy for these models. `docs/MODELS.md` carries the 140V
+    numbers until then.
+  - **Existing installs are on 2026.3.0.** `install.ps1` re-run upgrades the
+    venv via the new floors; a user who only `git pull`s and picks Qwen3.8
+    from a stale venv gets a segfault at load, not a message. Worth a
+    version check in `nollama.py` that names the fix (`pip install -U
+    openvino openvino-genai openvino-tokenizers`) before loading a model
+    whose registry entry declares a minimum.
+  - **Retire `-Nightly`?** Nothing in the registry needs it; it stays as the
+    test harness for "does the next runtime fix X" (used 2026-08-30 for the
+    LFM2/NPU 4 question). Decide when the next release lands.
 - **`transformers` main breaks the optimum backend's text-only path.**
   `5.16.0.dev0` calls `get_experts_implementation()` from
   `_optimize_model_for_decode()`; `OVModelForCausalLM` doesn't implement it, so
