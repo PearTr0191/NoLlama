@@ -1,4 +1,4 @@
-﻿// Node harness for the self-contained markdown renderer in static/js/app.js.
+// Node harness for the self-contained markdown renderer in static/js/app.js.
 // Extracts the pure functions straight from the shipped file (no build step)
 // and runs the table pass plus the regression cases the renderer is known to
 // handle. Run from the repo root:  node scripts/md-render-test.mjs
@@ -56,8 +56,14 @@ function extractFunction(name, source) {
     if (ch === '`') { inTpl = true; k++; continue; }
     if (ch === '/' && next === '/') { inLine = true; k += 2; continue; }
     if (ch === '/' && next === '*') { inBlock = true; k += 2; continue; }
-    if (ch === '/') {
-      // regex literal unless the previous char suggests a division operand
+    if (ch === '/' && next !== '*' && !/\s/.test(next)) {
+      // regex literal unless the previous char suggests a division operand,
+      // or the slash is followed by whitespace/EOF (can't be a regex body).
+      // NB: a regex literal requires a non-whitespace body char after '/',
+      // so `/` followed by \n, \r, or space is treated as division. This
+      // stops the scanner from eating into inline /** */ doclet comments that
+      // follow a `;` (where prev fails the division test) when the doclet's
+      // `*` was the next char (handled above) — here we guard the bare `/`.
       const division = prev !== '' && (isIdent(prev) || prev === ')' || prev === ']');
       if (division) { prev = '/'; k++; continue; }
       k++; // past opening '/'
@@ -180,6 +186,16 @@ const eq = (name, actual, expected) => actual === expected ? pass++ : (fail++, c
 
   const linkCell = mdEscapeAndRender('| m |\n|---|\n| [x](http://a.com/p|q) |');
   has('pipe in link URL stays in one cell', linkCell, '<td><a href="http://a.com/p|q">x</a></td>');
+
+  // splitTableRow: an unclosed `[` (no matching `)`) must NOT keep inLink set
+  // for the rest of the row. The row must still split on the remaining `|` so
+  // later cells are not swallowed into one text blob. Before the fix, a `[`
+  // with no `)` left inLink=true and ate every subsequent `|`, collapsing the
+  // whole row tail into a single cell.
+  const unclosedBracket = mdEscapeAndRender('| a | b | c |\n|---|---|---|\n| 1 | [unclosed | 3 |');
+  eq('unclosed bracket splits rest of row',
+    (unclosedBracket.match(/<tbody><tr><td>1<\/td>/, unclosedBracket) ? 1 : 0), 1);
+  has('unclosed bracket row has 3 cells', unclosedBracket, '<td>1</td><td>[unclosed</td><td>3</td>');
 
   // consecutive tables separated by a blank line render as two tables
   const twoTables = mdEscapeAndRender('| a |\n|---|\n| 1 |\n\n| b |\n|---|\n| 2 |');

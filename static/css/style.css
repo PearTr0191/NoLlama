@@ -10,6 +10,12 @@
     --border: #2a2a4a;
     --error: #e53935;
     --success: #4caf50;
+    /* History-length warning banner (NPU prompt-cap nudge) */
+    --warn-bg: #2b2416;
+    --warn-border: #8a6d1f;
+    --warn-text: #e8ce8a;
+    --warn-btn-bg: #8a6d1f;
+    --warn-btn-bg-hover: #a5832a;
 }
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -368,3 +374,38 @@ body {
     color: var(--accent);
 }
 .drop-overlay.active { display: flex; }
+
+/* --- History-length warning banner (NPU prompt-cap nudge) --- */
+.history-warning {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    background: var(--warn-bg);
+    border: 1px solid var(--warn-border);
+    color: var(--warn-text);
+    border-radius: 6px;
+    font-size: 12.5px;
+    line-height: 1.4;
+    padding: 6px 10px;
+}
+.history-warning[hidden] { display: none; }
+.history-warning button {
+    background: var(--warn-btn-bg);
+    color: var(--warn-text);
+    border: none;
+    border-radius: 4px;
+    padding: 3px 9px;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    white-space: nowrap;
+    flex-shrink: 0;
+}
+.history-warning button:hover,
+.history-warning button:focus-visible {
+    background: var(--warn-btn-bg-hover);
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+}
+
