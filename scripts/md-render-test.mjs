@@ -197,6 +197,20 @@ const eq = (name, actual, expected) => actual === expected ? pass++ : (fail++, c
     (unclosedBracket.match(/<tbody><tr><td>1<\/td>/, unclosedBracket) ? 1 : 0), 1);
   has('unclosed bracket row has 3 cells', unclosedBracket, '<td>1</td><td>[unclosed</td><td>3</td>');
 
+  // splitTableRow: a `]` with no following `(` must NOT pin inParens (footnote-
+  // style `[1]` is common in model output). Before the fix, every `]` set
+  // inParens=true regardless, so the pipe after `[1]` was swallowed as URL text
+  // and the row collapsed to a single cell.
+  eq('footnote [a] splits before pipe', JSON.stringify(splitTableRow('| [a] | b |')), JSON.stringify(['[a]', 'b']));
+  eq('multi-footnote splits before pipe', JSON.stringify(splitTableRow('| see [1] and [2] | b |')),
+    JSON.stringify(['see [1] and [2]', 'b']));
+
+  // Render-level check: the footnote row must not collapse into one cell.
+  const footnoteRender = mdEscapeAndRender('| [a] | b |\n|---|---|\n| 1 | 2 |');
+  eq('footnote row renders 2 header cells',
+    (footnoteRender.match(/<th>/g) || []).length, 2);
+  has('footnote row keeps [a] separate from b', footnoteRender, '<th>[a]</th><th>b</th>');
+
   // consecutive tables separated by a blank line render as two tables
   const twoTables = mdEscapeAndRender('| a |\n|---|\n| 1 |\n\n| b |\n|---|\n| 2 |');
   eq('two tables with blank line', (twoTables.match(/<table>/g) || []).length, 2);
