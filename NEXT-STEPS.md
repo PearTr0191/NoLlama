@@ -3,6 +3,44 @@
 State after the 2026-08-18 merge. Anything settled lives in README, TODONT or
 the docs — this file is only what's still open.
 
+## Pending a reboot of the 258V laptop — LFM2 garbage on NPU 4
+
+NPU driver **32.0.100.5540** is installed (pnputil, `oem43.inf`, exit 3010)
+but the kernel driver + firmware swap waits for a reboot; every process still
+reports `NPU_DRIVER_VERSION=1004778`. Do not reboot for it — the WSL2 project
+comes first. When the laptop does reboot anyway, run this **first** (Git Bash,
+no admin):
+
+```bash
+cd /c/devel/aweussom/python/NoLlama
+./venv/Scripts/python.exe -c "import openvino as ov; print(ov.Core().get_property('NPU','NPU_DRIVER_VERSION'))"   # expect 1005540
+PYTHONIOENCODING=utf-8 ./venv/Scripts/python.exe /c/Users/tommyl/npu-driver-backup/compiler-probe.py C:/Users/tommyl/models/LFM2.5-1.2B-Instruct-int4-cw-ov
+bash /c/Users/tommyl/npu-driver-backup/npu-probe.sh SmolLM3-3B-int8-cw-ov control   # NPU still healthy?
+```
+
+Read it as:
+- `Hello!`-type answers → the garbage was a **4778 runtime bug on NPU 4**; the
+  fix for users is "update the NPU driver". Then bisect downward to find the
+  first good driver: elevated pwsh 7,
+  `C:\Users\tommyl\npu-driver-backup\rollback-npu-driver.ps1 -Target 32.0.100.4724`
+  (and `.4512`), probe again after each.
+- still `cohclclcl…` → **NPU 4 is wrong for LFM2 regardless of driver**;
+  report the full matrix to openvinotoolkit/openvino#37322 (Intel already
+  reproduced "LFM2.5-1.2B gibberish on NPU" there on 2026-08-13).
+
+Either way, afterwards: TODONT entry, `models.json` + `docs/MODELS.md` caveat
+on the two LFM builds ("verified NPU 3 only"), the two HF model cards, and a
+reply on issue #24. To go back to the shipped driver:
+`rollback-npu-driver.ps1` (no args) — 4778 is still staged and backed up.
+
+What is already established (2026-08-30, full log in
+`C:\Users\tommyl\npu-driver-backup\FINDINGS.md`): with OpenVINO 2026.3.0,
+driver 4778 and the same files held constant, **NPU 3 (285K, arch 3720) is
+correct and NPU 4 (258V, arch 4000) emits byte-identical garbage** — through
+2026.3.0, 2026.3.1, the 2026.5.0 nightly, plugin *and* driver compiler, every
+NPUW knob tried, and Intel's own `LFM2.5-350M-int8-ov`. Same file on CPU/GPU
+in the same venv: correct. SmolLM3/Qwen3 on the same NPU: correct.
+
 ## Open
 
 - **VLM slots are agent-grade (merged as PR #30 + the prewarm commit).**

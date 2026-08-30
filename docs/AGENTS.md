@@ -26,6 +26,17 @@ results.
 > **prefix caching is on by default**, so that big system prompt is prefilled
 > once, not every turn — after the first turn, agent turns are fast (~47x on the
 > cached prefix). Disable with `--no-prompt-cache`.
+>
+> **Size the KV pool for your sessions.** With caching on, blocks are never
+> released, so a long coding session eventually owns the whole pool and then
+> *every* turn misses — TTFT jumps from well under a second to tens of seconds
+> and grows linearly with the prompt (82k chars → 58 s, 199k → 175 s on a
+> Panther Lake iGPU, issue #32). The auto-sizer caps the pool around 64k
+> tokens of the model's KV geometry; agent sessions that carry 50k+ tokens of
+> context want more: `--cache-size-gb 12` (16 if you routinely exceed 200k
+> chars) on a 64 GB machine. The startup line `prefix caching on (N GB KV
+> pool …)` shows what you got; if a *repeated* prompt's TTFT stays under a
+> second as the context grows, the pool is big enough.
 
 The tool prompt is rendered in Qwen3-Coder native format, and `parse_tool_calls`
 also understands Hermes, Mistral `[TOOL_CALLS]`, Llama `<|python_tag|>`, DeepSeek,

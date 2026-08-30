@@ -32,8 +32,8 @@ All are in the `install.ps1` menu, with measured numbers on real hardware:
 |---|---|---|
 | [`SmolLM3-3B-int4-cw-ov`](https://huggingface.co/aweussom/SmolLM3-3B-int4-cw-ov) | 23.3 tok/s | New in OpenVINO 2026.3; also runs GPU (29.7) / CPU (37.5) |
 | [`SmolLM3-3B-int8-cw-ov`](https://huggingface.co/aweussom/SmolLM3-3B-int8-cw-ov) | 12.3 tok/s | Quality-first variant; ~half the speed of int4-cw |
-| [`LFM2.5-1.2B-Instruct-int4-cw-ov`](https://huggingface.co/aweussom/LFM2.5-1.2B-Instruct-int4-cw-ov) | **38.8 tok/s** | Fastest model we've verified on an NPU. NPU-only build |
-| [`LFM2-1.2B-int4-cw-ov`](https://huggingface.co/aweussom/LFM2-1.2B-int4-cw-ov) | 36.5 tok/s | NPU-only build |
+| [`LFM2.5-1.2B-Instruct-int4-cw-ov`](https://huggingface.co/aweussom/LFM2.5-1.2B-Instruct-int4-cw-ov) | **38.8 tok/s** | Fastest model we've verified on an NPU. NPU-only build. **NPU 3 only** — see below |
+| [`LFM2-1.2B-int4-cw-ov`](https://huggingface.co/aweussom/LFM2-1.2B-int4-cw-ov) | 36.5 tok/s | NPU-only build. **NPU 3 only** — see below |
 | [`Qwen2.5-VL-3B-Instruct-int8-ov`](https://huggingface.co/aweussom/Qwen2.5-VL-3B-Instruct-int8-ov) | — (GPU VLM) | The proven small vision model, now a download instead of a 10-min conversion. Research license |
 | [`LFM2-8B-A1B-int4-ov`](https://huggingface.co/aweussom/LFM2-8B-A1B-int4-ov) | — (GPU MoE) | 87 tok/s resident on an Arc 140V; the disk-offload test model |
 
@@ -42,6 +42,16 @@ group-quantized int4 that `optimum-cli` produces crashes the Intel NPU
 driver compiler (a known vpux bug — `"Found N duplicated names"`). If you
 convert your own models for the NPU, use `download-model.ps1 -Weight
 int4-cw` (or `int8-cw`), which encodes the working recipe.
+
+**The two LFM builds are NPU 3 only (Arrow Lake / Meteor Lake) as of
+2026-08-30.** On a Lunar Lake NPU 4 (Core Ultra 7 258V) the same files run
+at 46–48 tok/s and emit word salad — `Say hello.` → `cohclclclcl…`,
+byte-identical across OpenVINO 2026.3.0, 2026.3.1 and the 2026.5 nightly,
+with the plugin compiler and the driver compiler alike; Intel's own
+`OpenVINO/LFM2.5-350M-int8-ov` fails the same way, and the same file on
+CPU/GPU in the same venv answers correctly. The 285K's NPU 3 runs them
+correctly with identical software. Upstream: openvinotoolkit/openvino#37322.
+Details and the still-open driver-runtime question in `TODONT.md`.
 
 ## Models
 

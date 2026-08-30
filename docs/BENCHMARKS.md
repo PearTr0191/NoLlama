@@ -44,7 +44,8 @@ feature silently does nothing, and NoLlama warns at startup instead of
 letting you believe your model got smaller.
 
 **XMX confirmed on** (`GPU_HW_MATMUL` in `OPTIMIZATION_CAPABILITIES`): Arc 140V
-iGPU, Arc Pro B60. **Not** on the desktop Xe-LPG iGPU. The flag only means
+iGPU, Arc Pro B60, Arc B390 Xe3 iGPU (Panther Lake, issue #32). **Not** on
+the Xe-LPG iGPUs — desktop 285K and the laptop 140T (285H) alike. The flag only means
 offload will engage — not that a model fits, and nothing at all for dense
 models, which have no experts to stream.
 
@@ -77,8 +78,10 @@ quants and sizes, so read it as *routes*, not a controlled A/B:
 | Arc 140V laptop iGPU, `--offload-ratio 30` | NoLlama/OpenVINO | 30B-A3B int4, 15 GB | 25.3 |
 | 24-core desktop CPU (64 GB RAM), model fits | NoLlama/OpenVINO | 30B-A3B int4 | 23.7 |
 | 24-core desktop CPU, model **bigger than RAM** | NoLlama/OpenVINO | Coder-Next int8, **74 GB** | 9-11.5 |
+| **Arc B390 Xe3 laptop iGPU (Panther Lake, 64 GB LPDDR5X-8533), resident** | NoLlama/OpenVINO | 30B-A3B int4, 15 GB | **52.7** |
+| Arc 140T Xe-LPG laptop iGPU (Arrow Lake-H, 64 GB shared budget), resident, **no XMX** | NoLlama/OpenVINO | Coder-Next int4, 80B-A3B, ~40 GB | 14.8 |
 | 8-core laptop CPU (LPDDR5X) | NoLlama/OpenVINO | 30B-A3B int4 | 9.1 |
-| Non-XMX desktop iGPU | — | any big MoE | won't load |
+| Non-XMX iGPU, model bigger than its shared-memory budget | — | any big MoE | won't load — offload needs XMX, so there is no fallback |
 
 The two B60 rows differ by one flag. Offload isn't a speed feature — it's a way
 to run what otherwise won't, and on a card with room it costs 5×.
@@ -130,6 +133,45 @@ roughly 11 tok/s decode after prefill — see
 CPU beats NPU on throughput (~7.4 vs ~5.2 tok/s) for this model.
 GPU text is fast but runs a smaller 3B model (not directly comparable).
 VLM image responses take ~3-4s regardless of answer length.
+
+### Panther Lake (Core Ultra X7 358H, Arc B390 Xe3 iGPU, 64 GB LPDDR5X-8533) — community, Linux
+
+Reported by ktecho in issue #32 (2026-08-26, Ubuntu 26.04, NoLlama
+`2026-08-24-1f89a63`, `benchmark.py --runs 5`), Qwen3-30B-A3B-Instruct-2507
+int4, fully resident:
+
+| Test | Xe3 iGPU decode | CPU decode |
+|---|---|---|
+| count 1-100 (steady state) | **52.7 tok/s** | 21.1 tok/s |
+| say hello (thinking) | 53.4 | 25.3 |
+| TTFT, short prompt | 0.09 s | 0.5–0.9 s |
+
+**An integrated GPU matching a discrete Arc Pro B60 (50.8) on the same
+model.** Xe3 has XMX, 8533 MT/s memory, and 64 GB to hold the whole MoE
+resident — the three things the 140V's offload route lacks. Same tester,
+same model, Qwen3.8-27B: not yet run.
+
+Also from that thread, the agent-session failure mode that is *not* the
+hardware: once a coding session's context outgrew the KV pool, every turn
+re-prefilled the whole prompt — 82k chars → 58 s TTFT, 140k → 108 s,
+199k → 175 s, linear in prompt size, after earlier repeat turns had hit
+the cache at 0.35 s. Fix: `--cache-size-gb 12` (or more) on a machine with
+64 GB. See [Agent tools](AGENTS.md).
+
+### Arrow Lake-H (Core Ultra 9 285H, Arc 140T Xe-LPG iGPU, no XMX) — community, Windows
+
+Reported by Dmitriy Teteruk in issue #24 (2026-08-28, `benchmark.py --runs
+5`), 64 GB shared-memory budget on the iGPU, everything resident:
+
+| Model | Decode tok/s (count 1-100) | TTFT | Note |
+|---|---|---|---|
+| Qwen3-8B int4-cw | 14.0 | 0.21 s | between the 285K desktop Xe-LPG (15.4) and the 140V (21.7) |
+| Qwen3-Coder-Next int4 (80B-A3B) | **14.8** | 1.2 s | resident, no offload — a non-XMX iGPU runs a big MoE fine if the memory is there |
+| Qwen3-Coder-Next int8 (74 GB) | 8.6 | 1.7 s | matches the 9.1 measured earlier (TODONT) |
+| Qwen3.8-27B int4 (dense, VLM path) | 2.4–3.0 | 7–11 s text, 77–91 s with images | confirms the "dense 28B ≈ 2–3 tok/s on this path" prediction |
+| Qwen3.8-27B int8 | 1.2–1.5 | 137–224 s with images | unusable |
+| Qwen3-VL-8B (int8) | 5.3–6.5 | 7.2 s with images | int8-vs-int4 explains the gap to Qwen3-8B |
+| LFM2.5-1.2B int4-cw **on the NPU** | 16–21 | 1.6–2.5 s | half the 285K desktop NPU's 38.8; driver 32.0.100.5540 vs 4778 — unexplained, see TODONT |
 
 ### NoLlama vs Ollama on the Arc 140V iGPU
 
