@@ -171,7 +171,7 @@ Reported by Dmitriy Teteruk in issue #24 (2026-08-28, `benchmark.py --runs
 | Qwen3.8-27B int4 (dense, VLM path) | 2.4–3.0 | 7–11 s text, 77–91 s with images | confirms the "dense 28B ≈ 2–3 tok/s on this path" prediction |
 | Qwen3.8-27B int8 | 1.2–1.5 | 137–224 s with images | unusable |
 | Qwen3-VL-8B (int8) | 5.3–6.5 | 7.2 s with images | int8-vs-int4 explains the gap to Qwen3-8B |
-| LFM2.5-1.2B int4-cw **on the NPU** | 16–21 | 1.6–2.5 s | half the 285K desktop NPU's 38.8; driver 32.0.100.5540 vs 4778 — unexplained, see TODONT |
+| LFM2.5-1.2B int4-cw **on the NPU** | **32.5** (41 on short prompts) | 1.0 s | 285K desktop NPU: 38.8. His first run gave 16–21 tok/s on a 100 W USB-dock supply; the laptop's own 140 W adapter restored it — **NPU throughput follows the power budget**, so benchmark on the real adapter (driver 5540, genai 2026.3.1) |
 
 ### NoLlama vs Ollama on the Arc 140V iGPU
 
