@@ -913,6 +913,18 @@ being about Qwen3.8 (a plain `requirements.txt` bump serves it) and is only
 worth keeping if a *new* pre-runtime model has taken its place. If none
 has, delete `-Nightly` and `requirements-nightly.txt` rather than
 maintaining an unused path.
+
+**Update 2026-08-30 — the release arrived early, as 2026.3.1 (2026-08-26),
+and the bump happened.** Its notes list Qwen3.8-27B and Muse-Glimmer-30B as
+"functionally enabled"; both verified here on the Arc 140V with the
+2026.3.1 wheels (Qwen3.8 3.6–4.8 tok/s, Glimmer ~2.5 tok/s, both correct),
+so `requirements.txt` floors are now `>=2026.3.1` and both are back in
+`models.json` — Qwen3.8 pinned to the repo's **`2026.3.1` branch**, because
+its `main` branch is a 2026.4-toolchain export that segfaults the 2026.3.x
+runtime at load (`revision` field in the registry, `--revision` in the
+downloaders). `-Nightly` stays for now as the *testing* path — it is how the
+LFM2-on-NPU-4 bug was shown to persist into 2026.5 the same day — not as a
+way to ship models; nothing in the registry needs it.
 ## `--offload-ratio` on a discrete GPU that fits the model (2026-08-18)
 
 Idea: the Arc Pro B60 has XMX, and TODONT/README already record offload as a

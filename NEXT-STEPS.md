@@ -141,21 +141,24 @@ the docs — this file is only what's still open.
   ~78 MB/s. Also leaves an abandoned partial in `.cache/huggingface/download`
   that has to be deleted by hand (17 GB of files, 28.7 GB on disk until then).
 
-- **Glimmer into `install.ps1`/`models.json`: waits for OpenVINO 2026.4 as a
-  *release*.** Standing rule: leading edge, not bleeding edge. The GenAI
-  reroute works on the 2026.4 nightly, but a menu item that needs a nightly
-  wheel is bleeding. When 2026.4 releases, the entry is Intel's
-  `OpenVINO/Muse-Glimmer-30B-int4-ov` with `"requires_nightly"` dropped —
-  the manual path until then is `install.ps1 -Nightly` plus a hand
-  download (`install-optimum.ps1` is no longer the recommended Glimmer
-  path, only the `--backend optimum` fallback). Docs may say we know it
-  will work; the installer may not act on it.
-
-  **Qwen3.8 27B rides the same gate** (removed from `models.json`
-  2026-08-21). It had a menu entry carrying `requires_nightly: true`, which
-  contradicted this very rule; the rule wins. Re-add
-  `OpenVINO/Qwen3.8-27B-int4-ov` when 2026.4 ships as a release — and test
-  it first, since it was never run here.
+- **Glimmer and Qwen3.8 are back in the menu (2026-08-30)** — the gate was
+  OpenVINO shipping them in a *release*, and 2026.3.1 (2026-08-26) did.
+  Both verified on the Arc 140V with the release wheels; `requirements.txt`
+  floors are `>=2026.3.1`; Qwen3.8 is pinned to its `2026.3.1` repo branch
+  (see TODONT, "nightly stack in the default install"). Still open from that:
+  - **B60 numbers on 2026.3.1** for both — the 140V figures (Qwen3.8 3.6–4.8
+    tok/s, Glimmer ~2.5) are iGPU-bound and say nothing about the card users
+    will actually buy for these models. `docs/MODELS.md` carries the 140V
+    numbers until then.
+  - **Existing installs are on 2026.3.0.** `install.ps1` re-run upgrades the
+    venv via the new floors; a user who only `git pull`s and picks Qwen3.8
+    from a stale venv gets a segfault at load, not a message. Worth a
+    version check in `nollama.py` that names the fix (`pip install -U
+    openvino openvino-genai openvino-tokenizers`) before loading a model
+    whose registry entry declares a minimum.
+  - **Retire `-Nightly`?** Nothing in the registry needs it; it stays as the
+    test harness for "does the next runtime fix X" (used 2026-08-30 for the
+    LFM2/NPU 4 question). Decide when the next release lands.
 - **`transformers` main breaks the optimum backend's text-only path.**
   `5.16.0.dev0` calls `get_experts_implementation()` from
   `_optimize_model_for_decode()`; `OVModelForCausalLM` doesn't implement it, so

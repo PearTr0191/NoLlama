@@ -35,6 +35,11 @@ param(
 
     [string]$Output = "",
 
+    # Repo branch/tag to download (pre-exported models only). Intel keeps the
+    # IR for the current OpenVINO release on a branch while main tracks the
+    # next runtime — e.g. OpenVINO/Qwen3.8-27B-int4-ov -Revision 2026.3.1.
+    [string]$Revision = "",
+
     [string]$HfToken,
 
     # Alternate venv for the conversion (default: <repo>\venv). Lets a scratch
@@ -59,7 +64,7 @@ if ($ExtraArgs) {
         Write-Host "  Try:  .\download-model.ps1 $HfId -Convert -Weight int8 -Trust" -ForegroundColor Yellow
     } else {
         Write-Host "ERROR: Unrecognized argument(s): $($ExtraArgs -join ', ')" -ForegroundColor Red
-        Write-Host "  Flags: -Convert -Weight <int4|int8> -Trust -Output <dir> -HfToken <token> -Venv <dir>" -ForegroundColor Yellow
+        Write-Host "  Flags: -Convert -Weight <int4|int8> -Trust -Output <dir> -Revision <branch> -HfToken <token> -Venv <dir>" -ForegroundColor Yellow
     }
     exit 1
 }
@@ -186,7 +191,9 @@ if ($Convert) {
     Write-Host ""
 
     $env:PYTHONIOENCODING = "utf-8"
-    hf download $HfId --local-dir $Output
+    $revArgs = @()
+    if ($Revision) { $revArgs = @("--revision", $Revision); Write-Host "  Revision: $Revision" }
+    hf download $HfId --local-dir $Output @revArgs
     if (-not $?) {
         Write-Host ""
         Write-Host "ERROR: Download failed." -ForegroundColor Red

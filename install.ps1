@@ -542,7 +542,15 @@ function Install-Model {
             Write-Host "  To:   $cachePath"
             Write-Host ""
             $env:PYTHONIOENCODING = "utf-8"
-            hf download $Selected.HfId --local-dir $cachePath
+            # An entry may pin a repo branch/tag ("revision"): Intel keeps the
+            # IR for the current release on a branch while main tracks the next
+            # runtime (Qwen3.8's main branch segfaults 2026.3.x at load).
+            $revArgs = @()
+            if ($Selected.PSObject.Properties['revision'] -and $Selected.revision) {
+                $revArgs = @("--revision", $Selected.revision)
+                Write-Host "  Revision: $($Selected.revision)"
+            }
+            hf download $Selected.HfId --local-dir $cachePath @revArgs
             if (-not $?) {
                 Write-Host "ERROR: Download failed." -ForegroundColor Red
                 Write-Host "  If 401/403 (gated/private model): re-run with a token --" -ForegroundColor Yellow
