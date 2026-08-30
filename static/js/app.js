@@ -185,6 +185,34 @@ function resetStreamState() {
 
 // --- Init ---
 
+/**
+ * Fold one SSE delta back into the <think>-tagged text the renderer expects.
+ *
+ * Why: the server streams reasoning as delta.reasoning_content (the field
+ * OpenAI-compatible agent clients render as live thinking) and the answer as
+ * delta.content; this UI's renderer keys on literal <think> tags, so the two
+ * channels are re-tagged here rather than teaching the renderer a second input
+ * shape. In: think = {open} carried across one stream, the delta object (may
+ * be {} on keep-alive frames). Out: text to append to fullText, '' if nothing.
+ */
+function appendDelta(think, delta) {
+    let out = '';
+    const reasoning = delta.reasoning_content || delta.reasoning;
+    if (reasoning) {
+        if (!think.open) { out += '<think>'; think.open = true; }
+        out += reasoning;
+    }
+    if (delta.content) out += closeThink(think) + delta.content;
+    return out;
+}
+
+/** Close an open think block for appendDelta's state; '' when none is open. */
+function closeThink(think) {
+    if (!think.open) return '';
+    think.open = false;
+    return '</think>\n';
+}
+
 /** Page boot: health + model list, then poll health every 15s. */
 async function init() {
     await checkHealth();
@@ -351,6 +379,7 @@ async function justAnswerMe(event) {
         const contentType = resp.headers.get('content-type') || '';
         if (contentType.includes('text/event-stream')) {
             let fullText = '';
+            const think = { open: false };  // reasoning_content -> <think> re-tagging state
             resetStreamState();
             const reader = resp.body.getReader();
             const decoder = new TextDecoder();
@@ -368,15 +397,16 @@ async function justAnswerMe(event) {
                     if (data === '[DONE]') continue;
                     try {
                         const chunk = JSON.parse(data);
-                        const delta = chunk.choices?.[0]?.delta?.content;
-                        if (delta) {
-                            fullText += delta;
+                        const piece = appendDelta(think, chunk.choices?.[0]?.delta || {});
+                        if (piece) {
+                            fullText += piece;
                             updateStreamBubble(assistantDiv, fullText);
                         }
                     } catch {}
                 }
             }
 
+            fullText += closeThink(think);
             assistantDiv.innerHTML = renderMarkdown(fullText, false);
             resetStreamState();
             const elapsed = ((performance.now() - t0) / 1000).toFixed(1);
@@ -801,6 +831,7 @@ async function sendMessage() {
         if (contentType.includes('text/event-stream')) {
             // Streaming
             let fullText = '';
+            const think = { open: false };  // reasoning_content -> <think> re-tagging state
             resetStreamState();
             const reader = resp.body.getReader();
             const decoder = new TextDecoder();
@@ -820,9 +851,9 @@ async function sendMessage() {
                     if (data === '[DONE]') continue;
                     try {
                         const chunk = JSON.parse(data);
-                        const delta = chunk.choices?.[0]?.delta?.content;
-                        if (delta) {
-                            fullText += delta;
+                        const piece = appendDelta(think, chunk.choices?.[0]?.delta || {});
+                        if (piece) {
+                            fullText += piece;
                             updateStreamBubble(assistantDiv, fullText);
                         }
                     } catch {}
@@ -830,6 +861,7 @@ async function sendMessage() {
             }
 
             // Re-render with streaming=false to collapse think block
+            fullText += closeThink(think);
             assistantDiv.innerHTML = renderMarkdown(fullText, false);
             resetStreamState();
 

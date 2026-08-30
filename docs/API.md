@@ -161,6 +161,25 @@ curl -N http://localhost:8000/v1/chat/completions \
   -d '{"messages":[{"role":"user","content":"Tell me a story"}],"stream":true}'
 ```
 
+#### Reasoning comes back as `reasoning_content`
+
+Thinking models' `<think>…</think>` spans are **not** in `content`. Streaming
+chunks carry them in `delta.reasoning_content` (the field OpenCode, Zed and
+other OpenAI-compatible agent clients render as live thinking), and the
+non-streaming reply in `message.reasoning_content`; `content` is the answer
+only. An empty think block (a `/no_think` turn) is dropped.
+
+```json
+{"choices":[{"delta":{"reasoning_content":"The user wants"},"finish_reason":null}]}
+{"choices":[{"delta":{"content":"Oslo"},"finish_reason":null}]}
+```
+
+Tool-enabled turns stream too: reasoning and any prose before the call arrive
+token by token, then the parsed `tool_calls` delta and
+`finish_reason: "tool_calls"`. Start the server with `--think-in-content` to
+get the pre-2026-08-30 shape (tags inside `content`) for a client that
+depends on it. The Ollama API (`/api/chat`) is unaffected either way.
+
 ### Other endpoints
 
 - `GET /health` — device status, model names, readiness

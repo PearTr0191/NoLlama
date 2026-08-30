@@ -15,10 +15,13 @@ results.
 > iGPU. The Qwen2.5-Coder GPU builds in the menu work well; pick a smaller size
 > (7B) for snappier prefill on big agent prompts.
 >
-> Tool turns are **buffered** (the whole reply is generated before the structured
-> `tool_calls` are sent), but the server emits SSE keep-alive pings during a long
-> prefill so agent clients (Copilot/OpenClaw) don't hit their idle timeout and
-> abort. Big agent system prompts (~20k tokens) prefill slowly on weak iGPUs — a
+> Tool turns **stream** on `/v1/chat/completions`: reasoning arrives as
+> `reasoning_content`, prose as `content`, and only the tool-call block itself
+> is held until it can be parsed into structured `tool_calls` (OpenCode and Zed
+> show the model thinking live). The server also emits SSE keep-alive pings
+> during a long prefill so agent clients (Copilot/OpenClaw) don't hit their idle
+> timeout and abort. On the Ollama API (`/api/chat`) a tool turn is still one
+> buffered reply. Big agent system prompts (~20k tokens) prefill slowly on weak iGPUs — a
 > smaller model, the CPU, or trimming the client's tool set all help. And
 > **prefix caching is on by default**, so that big system prompt is prefilled
 > once, not every turn — after the first turn, agent turns are fast (~47x on the

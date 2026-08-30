@@ -1342,6 +1342,7 @@ class DeviceSlot:
         self.supports_prefix_cache = True  # GenAI CB backend can prefix-cache; OptimumSlot can't
         self.kv_pool_gb = 0              # resolved KV pool for THIS slot (_resolve_kv_pool)
         self._atem = False               # Muse Glimmer channel stream needs translating
+        self.think_preseeded = False     # chat template opens <think> in the generation prompt (Qwen3.5/3.8)
 
     def load(self, model_dir):
         """Load model, auto-detecting VLM vs LLM."""
@@ -1448,6 +1449,11 @@ class DeviceSlot:
             else:
                 self.pipe = ovg.LLMPipeline(str(model_dir), device=self.device_id,
                                             **plugin_props)
+        # Uses the pipeline's own tokenizer, never a fresh ovg.Tokenizer: on a
+        # runtime older than the IR that second construction can segfault
+        # [OBSERVED 2026-08-30, 2026.3.0 + Qwen3.8 main-branch IR].
+        get_tok = getattr(self.pipe, "get_tokenizer", None)
+        self.think_preseeded = _prompt_preseeds_think(get_tok() if get_tok else None)
 
     def _resolve_kv_pool(self, vlm):
         """Set self.kv_pool_gb — the KV-cache pool for this slot's CB backend.
@@ -1683,15 +1689,27 @@ class DeviceSlot:
                 return
             yield token
 
-    def stream_vlm(self, text_prompt, images, gen, completion_id, created, t0):
-        """VLM generate — SSE streaming. openvino-genai 2026.1+."""
+    def stream_vlm_tokens(self, text_prompt, images, gen, heartbeat, tag=""):
+        """VLM twin of stream_tokens — same contract, over VLMPipeline.
+
+        Why a separate seam: VLMPipeline.generate takes prompt+images, not a
+        ChatHistory, and its decoded text has had special tokens stripped, so
+        Muse Glimmer's channel routing has to be rebuilt here by
+        _AtemPlainFilter before any consumer sees a chunk (the LLM seam has no
+        such step). Everything else — worker thread, lock, _cancel cleared
+        INSIDE the lock, _stream_error, None heartbeats, no finally-side
+        cancel — matches stream_tokens; the two must NOT be unified, the
+        generate call and the filter step are the genuine differences.
+
+        Yields translated str chunks, or None per `heartbeat` quiet seconds.
+        """
         token_queue = Queue()
-        token_count = 0
-        gen_error = [None]
+        self._stream_error = None
+        atem = _AtemPlainFilter() if self._atem else None
 
         def streamer_callback(token):
             if self._cancel.is_set():
-                return True
+                return True  # stop generation
             token_queue.put(token)
             return False
 
@@ -1699,156 +1717,106 @@ class DeviceSlot:
             try:
                 with self.lock:
                     self._cancel.clear()
+                    kwargs = dict(prompt=text_prompt, generation_config=gen,
+                                  streamer=streamer_callback)
                     if images:
-                        imgs = images[0] if len(images) == 1 else images
-                        self.pipe.generate(
-                            prompt=text_prompt, images=imgs,
-                            generation_config=gen, streamer=streamer_callback,
-                        )
-                    else:
-                        self.pipe.generate(
-                            prompt=text_prompt, generation_config=gen,
-                            streamer=streamer_callback,
-                        )
+                        kwargs["images"] = images[0] if len(images) == 1 else images
+                    self.pipe.generate(**kwargs)
                     self.last_used = time.time()
             except Exception as e:
-                gen_error[0] = e
+                self._stream_error = e
                 print(f"{datetime.now():%H:%M:%S} !! [{self.device_name}] "
-                      f"VLM generate error: {e}", flush=True)
+                      f"{tag}VLM generate error: {explain_genai_error(e, self)}", flush=True)
             finally:
                 token_queue.put(None)
 
         t = threading.Thread(target=_generate, daemon=True)
         t.start()
 
-        atem = _AtemPlainFilter() if self._atem else None
+        while True:
+            try:
+                token = token_queue.get(timeout=heartbeat)
+            except Empty:
+                if not t.is_alive():
+                    return  # worker died without the sentinel — defensive
+                yield None  # heartbeat marker
+                continue
+            if token is None:
+                break
+            if atem is not None:
+                token = atem.feed(token)
+            if token:
+                yield token
+        if atem is not None:
+            tail = atem.close()
+            if tail:
+                yield tail
 
-        try:
-            chunk = {
-                "id": completion_id, "object": "chat.completion.chunk",
-                "created": created, "model": self.model_name,
-                "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}],
-            }
-            yield f"data: {json.dumps(chunk)}\n\n"
+    def stream_vlm(self, text_prompt, images, gen, completion_id, created, t0):
+        """VLM generate — SSE streaming. Protocol layer over stream_vlm_tokens().
 
-            while True:
-                try:
-                    token = token_queue.get(timeout=180)
-                except Empty:
-                    break
-                if token is None:
-                    break
-                token_count += 1
-                if atem:
-                    token = atem.feed(token)
-                    if not token:
-                        continue  # swallowed into a channel header / held tail
-                chunk = {
-                    "id": completion_id, "object": "chat.completion.chunk",
-                    "created": created, "model": self.model_name,
-                    "choices": [{"index": 0, "delta": {"content": token}, "finish_reason": None}],
-                }
-                yield f"data: {json.dumps(chunk)}\n\n"
-
-            if atem:
-                tail = atem.close()
-                if tail:
-                    chunk = {
-                        "id": completion_id, "object": "chat.completion.chunk",
-                        "created": created, "model": self.model_name,
-                        "choices": [{"index": 0, "delta": {"content": tail}, "finish_reason": None}],
-                    }
-                    yield f"data: {json.dumps(chunk)}\n\n"
-
-            was_cancelled = self._cancel.is_set()
-            if gen_error[0] is not None:
-                err_chunk = {
-                    "id": completion_id, "object": "chat.completion.chunk",
-                    "created": created, "model": self.model_name,
-                    "choices": [{"index": 0, "delta": {
-                        "content": f"\n[error: {gen_error[0]}]"
-                    }, "finish_reason": "error"}],
-                }
-                yield f"data: {json.dumps(err_chunk)}\n\n"
-            else:
-                finish_reason = "cancelled" if was_cancelled else "stop"
-                chunk = {
-                    "id": completion_id, "object": "chat.completion.chunk",
-                    "created": created, "model": self.model_name,
-                    "choices": [{"index": 0, "delta": {}, "finish_reason": finish_reason}],
-                }
-                yield f"data: {json.dumps(chunk)}\n\n"
-            yield "data: [DONE]\n\n"
-        finally:
-            self._cancel.set()
-
-        elapsed = time.perf_counter() - t0
-        tps = token_count / elapsed if elapsed > 0 else 0
-        tag = " (cancelled)" if was_cancelled else (" (error)" if gen_error[0] else "")
-        print(f"{datetime.now():%H:%M:%S} -> [{self.device_name}] "
-              f"VLM {token_count} tokens in {elapsed:.1f}s ({tps:.1f} tok/s){tag}",
-              flush=True)
+        Same frames as stream_llm (keep-alive on None, reasoning_content for
+        <think> spans, wall-clock TTFT on the first token). It used to abort
+        after 180 quiet seconds with no keep-alive, which on a big prompt
+        ended the stream mid-prefill; now it pings like the LLM path.
+        """
+        yield from self._sse_stream(
+            self.stream_vlm_tokens(text_prompt, images, gen, heartbeat=HEARTBEAT_SECS),
+            completion_id, created, t0, tag="VLM ")
 
     def stream_llm(self, raw_messages, gen, completion_id, created, t0):
         """LLM generate — SSE streaming. Protocol layer over stream_tokens()."""
-        token_count = 0
+        yield from self._sse_stream(
+            self.stream_tokens(raw_messages, gen, heartbeat=HEARTBEAT_SECS),
+            completion_id, created, t0)
 
-        try:
-            chunk = {
+    def _sse_stream(self, tokens, completion_id, created, t0, tag=""):
+        """Turn a token seam into OpenAI SSE frames — shared by stream_llm/stream_vlm.
+
+        Why one body: the two paths differed only in which seam fed them, and
+        the frame rules must stay identical or clients see two dialects:
+        None -> empty-content keep-alive (resets content- and byte-based
+        watchdogs alike, a no-op for message assembly); first token stamps
+        wall-clock TTFT; <think> spans go out as reasoning_content via
+        _ThinkSplitter; the client-disconnect safety net (finally:
+        _cancel.set()) lives HERE, not in the seam — see stream_tokens.
+
+        In: a stream_tokens-shaped generator. Ends with finish_reason
+        stop / cancelled / error, then [DONE]; the log line prints after.
+        """
+        token_count = 0
+        was_cancelled = False
+        splitter = _ThinkSplitter(self.think_preseeded)
+
+        def frame(delta, finish=None):
+            return "data: " + json.dumps({
                 "id": completion_id, "object": "chat.completion.chunk",
                 "created": created, "model": self.model_name,
-                "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}],
-            }
-            yield f"data: {json.dumps(chunk)}\n\n"
+                "choices": [{"index": 0, "delta": delta, "finish_reason": finish}],
+            }) + "\n\n"
 
-            for token in self.stream_tokens(raw_messages, gen, heartbeat=HEARTBEAT_SECS):
+        try:
+            yield frame({"role": "assistant"})
+            for token in tokens:
                 if token is None:
-                    # No token yet — likely a long prefill on a big prompt.
-                    # Emit an empty-content delta to keep the client's idle
-                    # watchdog from aborting (a real chunk resets content-based
-                    # watchdogs, not just byte-based ones; empty string is a
-                    # no-op for assembly). The background thread delivers tokens
-                    # or the sentinel when ready.
-                    ka = {
-                        "id": completion_id, "object": "chat.completion.chunk",
-                        "created": created, "model": self.model_name,
-                        "choices": [{"index": 0, "delta": {"content": ""},
-                                     "finish_reason": None}],
-                    }
-                    yield f"data: {json.dumps(ka)}\n\n"
+                    yield frame({"content": ""})  # keep-alive during a long prefill
                     continue
                 if token_count == 0:
                     # Wall-clock TTFT: prefill is over when the first token lands.
                     self.last_ttft_ms = (time.perf_counter() - t0) * 1000
                 token_count += 1
-                chunk = {
-                    "id": completion_id, "object": "chat.completion.chunk",
-                    "created": created, "model": self.model_name,
-                    "choices": [{"index": 0, "delta": {"content": token}, "finish_reason": None}],
-                }
-                yield f"data: {json.dumps(chunk)}\n\n"
+                for kind, text in splitter.feed(token):
+                    yield frame({_DELTA_KEY[kind]: text})
+            for kind, text in splitter.close():
+                yield frame({_DELTA_KEY[kind]: text})
 
             # Capture state BEFORE the finally-block safety-net sets _cancel
             was_cancelled = self._cancel.is_set()
-            gen_error = [self._stream_error]
-            if gen_error[0] is not None:
-                finish_reason = "error"
-                err_chunk = {
-                    "id": completion_id, "object": "chat.completion.chunk",
-                    "created": created, "model": self.model_name,
-                    "choices": [{"index": 0, "delta": {
-                        "content": f"\n[error: {explain_genai_error(gen_error[0], self)}]"
-                    }, "finish_reason": "error"}],
-                }
-                yield f"data: {json.dumps(err_chunk)}\n\n"
+            if self._stream_error is not None:
+                yield frame({"content": f"\n[error: {explain_genai_error(self._stream_error, self)}]"},
+                            "error")
             else:
-                finish_reason = "cancelled" if was_cancelled else "stop"
-                chunk = {
-                    "id": completion_id, "object": "chat.completion.chunk",
-                    "created": created, "model": self.model_name,
-                    "choices": [{"index": 0, "delta": {}, "finish_reason": finish_reason}],
-                }
-                yield f"data: {json.dumps(chunk)}\n\n"
+                yield frame({}, "cancelled" if was_cancelled else "stop")
             yield "data: [DONE]\n\n"
         finally:
             # Safety net: if client disconnects, stop generation
@@ -1856,11 +1824,11 @@ class DeviceSlot:
 
         elapsed = time.perf_counter() - t0
         tps = token_count / elapsed if elapsed > 0 else 0
-        tag = " (cancelled)" if was_cancelled else (" (error)" if gen_error[0] else "")
+        err_tag = " (cancelled)" if was_cancelled else (" (error)" if self._stream_error else "")
         ttft = (f", TTFT {self.last_ttft_ms:.0f}ms" if token_count and
                 self.last_ttft_ms is not None else "")
-        print(f"{datetime.now():%H:%M:%S} -> [{self.device_name}] "
-              f"{token_count} tokens in {elapsed:.1f}s ({tps:.1f} tok/s{ttft}){tag}",
+        print(f"{datetime.now():%H:%M:%S} -> [{self.device_name}] {tag}"
+              f"{token_count} tokens in {elapsed:.1f}s ({tps:.1f} tok/s{ttft}){err_tag}",
               flush=True)
 
     @property
@@ -2090,6 +2058,207 @@ class _AtemPlainFilter:
         return rest
 
 
+def _prompt_preseeds_think(tokenizer, hf=False):
+    """True when the chat template itself opens a <think> block at the end of the prompt.
+
+    Why: Qwen3.5/3.8-style templates append '<think>\n' to the assistant turn,
+    so the model emits only the CLOSING tag — a splitter waiting for '<think>'
+    streams the whole reasoning as content [OBSERVED 2026-08-30, Qwen3.8-27B
+    on 2026.3.1: 'We need to respond only with...</think>\n\nHELLO!' arrived
+    entirely in delta.content]. Rendering one dummy turn through the loaded
+    tokenizer answers it exactly, per model, at load time.
+
+    In: a genai Tokenizer (pipe.get_tokenizer()) or, hf=True, a transformers
+    tokenizer; None is accepted. Out: bool — False on any failure (no
+    template, runtime without apply_chat_template), never an exception.
+    """
+    if tokenizer is None:
+        return False
+    msgs = [{"role": "user", "content": "hi"}]
+    try:
+        if hf:
+            rendered = tokenizer.apply_chat_template(msgs, add_generation_prompt=True,
+                                                     tokenize=False)
+        else:
+            rendered = tokenizer.apply_chat_template(msgs, add_generation_prompt=True)
+    except Exception:
+        return False
+    return str(rendered).rstrip().endswith("<think>")
+
+
+class _ThinkSplitter:
+    """Incremental <think>...</think> splitter: reasoning vs answer, any split point.
+
+    Why: OpenAI-compatible agent clients (OpenCode, and the Zed/LM Studio
+    style of consumer) render live reasoning from `delta.reasoning_content`
+    and treat `delta.content` as the answer; a <think> block inside content
+    shows up as prose, or sits behind a "Thinking" spinner until the turn
+    ends (issue #36). Models emit the tags as ordinary text and a tag can
+    straddle two decoded chunks, so a possible tag prefix at the buffer tail
+    is held back rather than emitted — the same dance as the ATEM filters,
+    which run before this and produce the tags it keys on.
+
+    In: decoded text chunks. Out of feed()/close(): an ordered list of
+    (kind, text) with kind 'reasoning' or 'content'. A block that holds only
+    whitespace (what a /no_think turn produces) is dropped, and the newlines
+    a model puts right after </think> are trimmed from the answer. Under
+    --think-in-content everything is 'content', tags included.
+    """
+
+    _OPEN = "<think>"
+    _CLOSE = "</think>"
+
+    def __init__(self, preseeded=False):
+        """Fresh splitter, one per generation — state below is per-stream.
+
+        preseeded: the chat template already opened a think block (see
+        _prompt_preseeds_think), so start inside one and wait for </think>.
+        """
+        self._buf = ""
+        self._think = bool(preseeded)
+        self._think_started = False  # non-whitespace reasoning seen in this block
+        self._trim_lead = False      # drop the newline(s) a model puts after </think>
+
+    @staticmethod
+    def _held_tail(buf, tag):
+        """Length of the buffer tail that could be the start of `tag`."""
+        for ln in range(min(len(buf), len(tag) - 1), 0, -1):
+            if tag.startswith(buf[-ln:]):
+                return ln
+        return 0
+
+    def _content(self, text, out):
+        """Queue an answer piece, trimming the post-</think> newlines once."""
+        if self._trim_lead:
+            text = text.lstrip("\n")
+            if not text:
+                return
+            self._trim_lead = False
+        if text:
+            out.append(("content", text))
+
+    def feed(self, text):
+        """Split one chunk; returns the (kind, text) pieces ready to emit now."""
+        out = []
+        if THINK_IN_CONTENT:
+            if text:
+                out.append(("content", text))
+            return out
+        self._buf += text
+        while self._buf:
+            if not self._think:
+                i = self._buf.find(self._OPEN)
+                if i >= 0:
+                    self._content(self._buf[:i], out)
+                    self._buf = self._buf[i + len(self._OPEN):]
+                    self._think, self._think_started = True, False
+                    continue
+                held = self._held_tail(self._buf, self._OPEN)
+                emit, self._buf = (self._buf[:-held], self._buf[-held:]) if held else (self._buf, "")
+                self._content(emit, out)
+                break
+            j = self._buf.find(self._CLOSE)
+            if j >= 0:
+                piece = self._buf[:j] if self._think_started else self._buf[:j].lstrip("\n")
+                if piece.strip() or self._think_started:
+                    out.append(("reasoning", piece))
+                self._buf = self._buf[j + len(self._CLOSE):]
+                self._think, self._trim_lead = False, True
+                continue
+            if not self._think_started and not self._buf.strip():
+                break  # nothing but whitespace so far — may be an empty block
+            held = self._held_tail(self._buf, self._CLOSE)
+            emit, self._buf = (self._buf[:-held], self._buf[-held:]) if held else (self._buf, "")
+            if emit:
+                if not self._think_started:
+                    emit = emit.lstrip("\n")
+                    self._think_started = True
+                out.append(("reasoning", emit))
+            break
+        return out
+
+    def close(self):
+        """Flush what remains (stream ended mid-tag or mid-block)."""
+        out = []
+        rest, self._buf = self._buf, ""
+        if self._think:
+            if rest.strip() or self._think_started:
+                out.append(("reasoning", rest))
+            self._think = False
+        else:
+            self._content(rest, out)
+        return out
+
+
+def _split_think(text, preseeded=False):
+    """Non-streaming twin of _ThinkSplitter: (reasoning, content) for a whole reply.
+
+    Same rules (whitespace-only block dropped, post-tag newlines trimmed,
+    --think-in-content leaves everything in content) so the JSON reply and
+    the streamed one describe the same turn.
+    """
+    sp = _ThinkSplitter(preseeded)
+    pieces = sp.feed(text or "") + sp.close()
+    return ("".join(t for k, t in pieces if k == "reasoning"),
+            "".join(t for k, t in pieces if k == "content"))
+
+
+class _ToolCallGate:
+    """Stream answer text until a tool-call opener appears, then hold.
+
+    Why: a structured tool_calls delta needs the whole call block parsed, but
+    nothing before the block needs to wait — and agent clients send tools on
+    every request, so buffering whole tool turns meant they never saw a live
+    token (issue #36). The gate passes text through until the first opener of
+    any syntax parse_tool_calls understands, holds from there to the end of
+    the turn, and hands the held text back for parsing.
+
+    A possible opener prefix at the tail is held for one more chunk (a lone
+    '<' or '[' arrives a token late; nothing is lost). The bare-JSON fallback
+    has no opener, so an answer whose first non-blank character is '{' or
+    '[' is held whole — as every tool turn was before this gate existed.
+
+    In: answer text only (reasoning goes around the gate). Out of feed(): the
+    text safe to emit now ('' while holding). .held is the unreleased text.
+    """
+
+    _OPENERS = ("<tool_call>", "<function=", "<atem:function_calls>",
+                "[TOOL_CALLS]", "<|python_tag|>", _DS_BEGIN)
+
+    def __init__(self):
+        """Fresh gate, one per generation."""
+        self._buf = ""
+        self._holding = False
+        self._emitted = False
+
+    @property
+    def held(self):
+        """Text not yet released to the client."""
+        return self._buf
+
+    def feed(self, text):
+        """Pass through answer text up to a tool-call opener; hold the rest."""
+        self._buf += text
+        if self._holding:
+            return ""
+        hits = [(self._buf.find(o), o) for o in self._OPENERS]
+        hits = [(p, o) for p, o in hits if p >= 0]
+        if hits:
+            pos = min(hits)[0]
+            out, self._buf = self._buf[:pos], self._buf[pos:]
+            self._holding = True
+        elif not self._emitted and self._buf.lstrip()[:1] in ("{", "[", ""):
+            return ""  # bare-JSON fallback candidate (or only whitespace yet): hold
+        else:
+            held = max((ln for o in self._OPENERS
+                        for ln in range(min(len(self._buf), len(o) - 1), 0, -1)
+                        if o.startswith(self._buf[-ln:])), default=0)
+            out, self._buf = (self._buf[:-held], self._buf[-held:]) if held else (self._buf, "")
+        if out.strip():
+            self._emitted = True
+        return out
+
+
 _HF_PENALTY_NOTED = [False]
 
 
@@ -2243,6 +2412,7 @@ class OptimumSlot(DeviceSlot):
         except Exception:
             self._atem = False
         self.pipe = self.model  # inherited ensure_loaded/unload key on .pipe
+        self.think_preseeded = _prompt_preseeds_think(self.tokenizer, hf=True)
 
     def _stopping_criteria(self):
         """Cancel hook for transformers generate — polls slot._cancel.
@@ -2463,6 +2633,8 @@ class WhisperSlot:
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 MAX_REQUEST_BYTES = 50 * 1024 * 1024  # 50 MB — enough for large base64 images
 HEARTBEAT_SECS = 15  # SSE keep-alive cadence during long prefill (big prompts / tool turns)
+THINK_IN_CONTENT = False  # legacy wire shape: <think> stays inside content (--think-in-content)
+_DELTA_KEY = {"reasoning": "reasoning_content", "content": "content"}  # _ThinkSplitter kind -> delta field
 
 # Default repetition penalty, overridable in nollama.ini ([generation] section)
 # next to this file. Ollama ships 1.1, which breaks thinking-loops faster but
@@ -2554,117 +2726,120 @@ def openai_error(message, error_type="invalid_request_error", status=400):
     return jsonify({"error": {"message": message, "type": error_type}}), status
 
 
-def _sse_replay(completion_id, created, model, message, finish_reason):
-    """Emit a buffered chat result as an OpenAI streaming SSE sequence.
+def _assistant_message(text, tool_calls, preseeded=False):
+    """Build the non-streaming assistant message: content, reasoning_content, tool_calls.
 
-    Used for tool-enabled turns, where we must buffer the full generation
-    before we can hand back a structured tool_calls delta.
+    Why: the JSON reply must describe the turn the same way the streamed one
+    does — <think> spans go to reasoning_content (unless --think-in-content),
+    and content is None on a call-only turn per the OpenAI spec. Returns
+    (message, finish_reason).
     """
-    def chunk(delta, finish=None):
-        return "data: " + json.dumps({
-            "id": completion_id, "object": "chat.completion.chunk",
-            "created": created, "model": model,
-            "choices": [{"index": 0, "delta": delta, "finish_reason": finish}],
-        }) + "\n\n"
-
-    yield chunk({"role": "assistant"})
-    if message.get("content"):
-        yield chunk({"content": message["content"]})
-    for i, tc in enumerate(message.get("tool_calls") or []):
-        yield chunk({"tool_calls": [{
-            "index": i, "id": tc["id"], "type": "function",
-            "function": tc["function"],
-        }]})
-    yield chunk({}, finish_reason)
-    yield "data: [DONE]\n\n"
+    reasoning, content = _split_think(text, preseeded)
+    if tool_calls:
+        message = {"role": "assistant", "content": content or None, "tool_calls": tool_calls}
+        finish = "tool_calls"
+    else:
+        message = {"role": "assistant", "content": content}
+        finish = "stop"
+    if reasoning.strip():
+        message["reasoning_content"] = reasoning
+    return message, finish
 
 
 def _sse_tool_stream(slot, raw_messages, gen, tools, completion_id, created, t0,
                      vlm=None):
-    """Buffered tool turn, streamed with keep-alive frames.
+    """Token-streamed tool turn: text flows live, the call block is parsed at the end.
 
-    A tool turn must be fully generated before we can emit a structured
-    tool_calls delta — but prefilling a big agent prompt (e.g. an OpenClaw
-    system prompt) on a small device can take minutes, longer than a client's
-    idle watchdog. So run generation in a background thread and emit SSE pings
-    until it finishes, then replay the parsed result. Without this the client
-    sees nothing during prefill and aborts (and OpenVINO can't cancel a blocked
-    prefill, so the abandoned generation keeps churning).
+    Why: agent clients send tools on every request, so buffering tool turns
+    meant they never saw a live token — OpenCode showed a spinner until the
+    turn ended (issue #36). Reasoning streams as reasoning_content, answer
+    text streams as content until _ToolCallGate sees a tool-call opener; from
+    there the turn is held and, when generation ends, parse_tool_calls turns
+    the held text into structured tool_calls deltas. Keep-alive frames still
+    cover a long prefill (the seam's None marker), and OpenVINO still cannot
+    cancel a blocked prefill, so an aborted client leaves it churning.
 
-    vlm: (text_prompt, images) when the slot is a VLM — the same buffered
-    turn, generated through the VLM pipeline instead of ChatHistory.
+    vlm: (text_prompt, images) when the slot is a VLM — same frames, fed by
+    stream_vlm_tokens. If the opener never became a call, the held text is
+    released as content before finishing (the gate's false-alarm case).
     """
-    result = {}
-
-    def _run():
-        try:
-            if vlm is not None:
-                result["text"] = slot.generate_vlm(vlm[0], vlm[1], gen)
-            else:
-                result["text"] = slot.generate_llm(raw_messages, gen)
-        except Exception as e:  # noqa: BLE001 — surfaced to the client below
-            result["error"] = e
-
-    th = threading.Thread(target=_run, daemon=True)
-    th.start()
-
-    # Immediate role frame so the client sees activity at once, then a ping
-    # every HEARTBEAT_SECS while generation runs (no tokens exist yet).
-    yield ("data: " + json.dumps({
-        "id": completion_id, "object": "chat.completion.chunk",
-        "created": created, "model": slot.model_name,
-        "choices": [{"index": 0, "delta": {"role": "assistant"},
-                     "finish_reason": None}],
-    }) + "\n\n")
-    while th.is_alive():
-        th.join(timeout=HEARTBEAT_SECS)
-        if th.is_alive():
-            # Empty-content keep-alive (resets content- and byte-based client
-            # watchdogs alike; empty string is a no-op for message assembly).
-            yield ("data: " + json.dumps({
-                "id": completion_id, "object": "chat.completion.chunk",
-                "created": created, "model": slot.model_name,
-                "choices": [{"index": 0, "delta": {"content": ""},
-                             "finish_reason": None}],
-            }) + "\n\n")
-
-    elapsed = time.perf_counter() - t0
-    if result.get("error") is not None:
-        err = explain_genai_error(result["error"], slot)
-        print(f"{datetime.now():%H:%M:%S} !! [{slot.device_name}] "
-              f"{'VLM' if vlm is not None else 'LLM'} error: {err}", flush=True)
-        yield ("data: " + json.dumps({
+    def frame(delta, finish=None):
+        return "data: " + json.dumps({
             "id": completion_id, "object": "chat.completion.chunk",
             "created": created, "model": slot.model_name,
-            "choices": [{"index": 0, "delta": {"content": f"\n[error: {err}]"},
-                         "finish_reason": "error"}],
-        }) + "\n\n")
+            "choices": [{"index": 0, "delta": delta, "finish_reason": finish}],
+        }) + "\n\n"
+
+    if vlm is not None:
+        tokens = slot.stream_vlm_tokens(vlm[0], vlm[1], gen, heartbeat=HEARTBEAT_SECS)
+    else:
+        tokens = slot.stream_tokens(raw_messages, gen, heartbeat=HEARTBEAT_SECS)
+    splitter, gate = _ThinkSplitter(getattr(slot, "think_preseeded", False)), _ToolCallGate()
+    token_count = 0
+    was_cancelled = False
+    tool_calls = []
+
+    def route(pieces):
+        """Reasoning goes straight out; answer text goes through the gate."""
+        for kind, text in pieces:
+            if kind == "reasoning":
+                yield frame({_DELTA_KEY[kind]: text})
+            else:
+                out = gate.feed(text)
+                if out:
+                    yield frame({"content": out})
+
+    try:
+        yield frame({"role": "assistant"})
+        for token in tokens:
+            if token is None:
+                yield frame({"content": ""})  # keep-alive during a long prefill
+                continue
+            if token_count == 0:
+                # Wall-clock TTFT: prefill is over when the first token lands.
+                slot.last_ttft_ms = (time.perf_counter() - t0) * 1000
+            token_count += 1
+            yield from route(splitter.feed(token))
+        yield from route(splitter.close())
+
+        # Capture state BEFORE the finally-block safety-net sets _cancel
+        was_cancelled = slot._cancel.is_set()
+        if slot._stream_error is not None:
+            yield frame({"content": f"\n[error: {explain_genai_error(slot._stream_error, slot)}]"},
+                        "error")
+            yield "data: [DONE]\n\n"
+            return
+        # Only the held text can contain a call: the gate released nothing
+        # past an opener, and the bare-JSON case held the whole answer.
+        leftover, tool_calls = parse_tool_calls(gate.held, tools)
+        if tool_calls:
+            if leftover.strip():
+                yield frame({"content": leftover})
+            for i, tc in enumerate(tool_calls):
+                yield frame({"tool_calls": [{"index": i, "id": tc["id"], "type": "function",
+                                             "function": tc["function"]}]})
+            yield frame({}, "tool_calls")
+        else:
+            if gate.held.strip():
+                yield frame({"content": gate.held})  # opener that never became a call
+            yield frame({}, "cancelled" if was_cancelled else "stop")
         yield "data: [DONE]\n\n"
-        return
+    finally:
+        # Safety net: if client disconnects, stop generation
+        slot._cancel.set()
 
-    text = result.get("text", "")
-    n_words = len(text.split())
-    ttft = (f", TTFT {slot.last_ttft_ms:.0f}ms"
-            if slot.last_ttft_ms is not None else "")
+    elapsed = time.perf_counter() - t0
+    tps = token_count / elapsed if elapsed > 0 else 0
+    err_tag = " (cancelled)" if was_cancelled else (" (error)" if slot._stream_error else "")
+    ttft = (f", TTFT {slot.last_ttft_ms:.0f}ms" if token_count and
+            slot.last_ttft_ms is not None else "")
     print(f"{datetime.now():%H:%M:%S} -> [{slot.device_name}] "
-          f"~{n_words} tokens in {elapsed:.1f}s "
-          f"({n_words / max(elapsed, 1e-6):.1f} tok/s{ttft})", flush=True)
-
-    text, tool_calls = parse_tool_calls(text, tools)
+          f"{'VLM ' if vlm is not None else ''}{token_count} tokens in {elapsed:.1f}s "
+          f"({tps:.1f} tok/s{ttft}){err_tag}", flush=True)
     if tool_calls:
         print(f"{datetime.now():%H:%M:%S} -> [{slot.device_name}] "
               f"{len(tool_calls)} tool call(s): "
               f"{', '.join(tc['function']['name'] for tc in tool_calls)}", flush=True)
-        message = {"role": "assistant", "content": text or None, "tool_calls": tool_calls}
-        finish_reason = "tool_calls"
-    else:
-        message = {"role": "assistant", "content": text}
-        finish_reason = "stop"
-
-    # Reuse the replay emitter (it re-sends a role frame — harmless, clients
-    # just set role twice) for the content/tool_calls/finish/[DONE] tail.
-    for frame in _sse_replay(completion_id, created, slot.model_name, message, finish_reason):
-        yield frame
 
 
 def _slot_serviceable(slot):
@@ -3075,12 +3250,7 @@ def chat_completions():
                       f"{len(tool_calls)} tool call(s): "
                       f"{', '.join(tc['function']['name'] for tc in tool_calls)}",
                       flush=True)
-        if tool_calls:
-            message = {"role": "assistant", "content": text or None, "tool_calls": tool_calls}
-            finish_reason = "tool_calls"
-        else:
-            message = {"role": "assistant", "content": text}
-            finish_reason = "stop"
+        message, finish_reason = _assistant_message(text, tool_calls, slot.think_preseeded)
 
         resp = jsonify({
             "id": completion_id, "object": "chat.completion",
@@ -3136,12 +3306,7 @@ def chat_completions():
                   f"{', '.join(tc['function']['name'] for tc in tool_calls)}",
                   flush=True)
 
-    if tool_calls:
-        message = {"role": "assistant", "content": text or None, "tool_calls": tool_calls}
-        finish_reason = "tool_calls"
-    else:
-        message = {"role": "assistant", "content": text}
-        finish_reason = "stop"
+    message, finish_reason = _assistant_message(text, tool_calls, slot.think_preseeded)
 
     resp = jsonify({
         "id": completion_id, "object": "chat.completion",
@@ -3888,6 +4053,11 @@ def parse_args():
                         "Implies --idle-timeout 0 (idle unload would discard the cache).")
     p.add_argument("--no-prewarm", action="store_true",
                    help="Disable the automatic prewarm that --idle-timeout 0 turns on.")
+    p.add_argument("--think-in-content", action="store_true",
+                   help="Legacy wire shape: keep <think>...</think> inside the assistant "
+                        "content. By default reasoning streams as delta.reasoning_content "
+                        "(what OpenAI-compatible agent clients render as live thinking) "
+                        "and the answer as delta.content; the Ollama API is unaffected.")
     p.add_argument("--offload-ratio", type=int, default=0, metavar="PCT",
                    help="Stream PCT%% of MoE expert weights from disk instead of "
                         "keeping them GPU-resident (OpenVINO 2026.3+ disk offload). "
@@ -3916,7 +4086,7 @@ def main():
     docs/slot-lifecycle.mmd maps this; numbered comments below mark the steps.
     """
     global primary, secondary, whisper_slot, max_dim, debug, vscode_compat
-    global PROMPT_CACHE, PROMPT_CACHE_GB, PREWARM_FILE, OFFLOAD_RATIO
+    global PROMPT_CACHE, PROMPT_CACHE_GB, PREWARM_FILE, OFFLOAD_RATIO, THINK_IN_CONTENT
     global VSCODE_OLLAMA_VERSION
 
     args = parse_args()
@@ -3934,6 +4104,7 @@ def main():
     VSCODE_OLLAMA_VERSION = args.vscode_ollama_version
     PROMPT_CACHE = not args.no_prompt_cache
     PROMPT_CACHE_GB = args.cache_size_gb
+    THINK_IN_CONTENT = args.think_in_content
     OFFLOAD_RATIO = max(0, min(99, args.offload_ratio))
     if OFFLOAD_RATIO:
         # Offload is a silent no-op without XMX — say so up front instead of

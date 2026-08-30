@@ -1,38 +1,52 @@
 %% Token streaming: the stream_tokens seam, its consumers, cancel semantics.
 %% Drawn 2026-08-19 from nollama.py @ 85e796f.
+%% Updated 2026-08-30: stream_vlm_tokens seam, shared _sse_stream, _ThinkSplitter/_ToolCallGate (issue #36).
 %% Legend: solid = normal path, dashed = failure/timeout/cancel paths,
 %%         ALL-CAPS nodes = prose annotations.
 %% Palette: route (blue) = protocol consumers, gen (green) = backend/worker,
 %%          client (yellow) = wire frames, warn (orange) = annotations.
-%% covers: nollama.py:stream_tokens,stream_llm,stream_vlm,_ollama_stream_chat,_ollama_stream_generate,generate_llm,cancel,explain_genai_error,_AtemStreamFilter,_AtemPlainFilter
+%% covers: nollama.py:stream_tokens,stream_vlm_tokens,stream_llm,stream_vlm,_sse_stream,_ollama_stream_chat,_ollama_stream_generate,generate_llm,cancel,explain_genai_error,_AtemStreamFilter,_AtemPlainFilter,_ThinkSplitter,_split_think,_ToolCallGate,_prompt_preseeds_think
 flowchart TB
   stream_tokens["DeviceSlot.stream_tokens<br/>SEAM between backend and protocol.<br/>Owns: worker thread, lock, clearing<br/>_cancel INSIDE the lock, _stream_error.<br/>Yields str chunk, or None after
   'heartbeat' quiet seconds"]
   worker["worker thread:<br/>pipe.generate(history, gen, streamer_callback)<br/>tokens -> Queue; sentinel None in finally"]
   opt_stream_tokens["OptimumSlot.stream_tokens<br/>same contract over transformers<br/>TextIteratorStreamer; ATEM markers kept<br/>visible for _AtemStreamFilter"]
+  stream_vlm_tokens["DeviceSlot.stream_vlm_tokens<br/>VLM twin of the seam: VLMPipeline takes<br/>prompt+images, not ChatHistory; runs<br/>_AtemPlainFilter before yielding; same<br/>None heartbeats (the old 180s silent<br/>abort in stream_vlm is gone)"]
 
   stream_tokens --> worker
+  stream_vlm_tokens --> worker
   worker -.->|"backend exception"| _stream_error["_stream_error set;<br/>explain_genai_error names the fix<br/>(KV pool too small, NPU compiler, ...)"]
 
-  stream_llm["stream_llm (OpenAI SSE)<br/>None -> empty-content delta keepalive;<br/>first token stamps wall-clock TTFT"]
-  _ollama_stream_chat["_ollama_stream_chat (ndjson)<br/>None after 120s ABORTS<br/>(historical no-token timeout)"]
+  _sse_stream["_sse_stream (OpenAI SSE, shared body)<br/>None -> empty-content delta keepalive;<br/>first token stamps wall-clock TTFT;<br/>finish stop / cancelled / error, [DONE]"]
+  stream_llm["stream_llm / stream_vlm<br/>thin wrappers: pick the seam,<br/>delegate to _sse_stream"]
+  tool_stream["_sse_tool_stream (request-flow.mmd)<br/>same frames, plus _ToolCallGate<br/>and tool_calls deltas at the end"]
+  _ollama_stream_chat["_ollama_stream_chat (ndjson)<br/>None after 120s ABORTS<br/>(historical no-token timeout);<br/>think stays inside content"]
   _ollama_stream_generate["_ollama_stream_generate (ndjson)<br/>same abort; no TTFT"]
   generate_llm["generate_llm (OptimumSlot)<br/>non-streaming = joined stream,<br/>heartbeat=None blocks forever"]
 
-  stream_tokens --> stream_llm
+  stream_tokens --> _sse_stream
+  stream_vlm_tokens --> _sse_stream
+  _sse_stream --> stream_llm
+  stream_tokens --> tool_stream
+  stream_vlm_tokens --> tool_stream
   stream_tokens --> _ollama_stream_chat
   stream_tokens --> _ollama_stream_generate
   opt_stream_tokens --> generate_llm
 
-  stream_vlm["stream_vlm<br/>own worker+queue (VLMPipeline takes<br/>prompt+images, not ChatHistory);<br/>180s quiet timeout, no keepalive pings"]
+  splitter["_ThinkSplitter / _split_think<br/>think spans -> reasoning_content deltas,<br/>answer -> content; tag prefixes held back<br/>across chunk boundaries; empty block dropped.<br/>_prompt_preseeds_think (at load, via the<br/>pipeline's own tokenizer) starts it inside a<br/>block for templates that open think themselves.<br/>--think-in-content restores the old shape"]
+  gate["_ToolCallGate<br/>content streams until a tool-call opener<br/>(any syntax parse_tool_calls knows);<br/>held from there, parsed at the end"]
+  _sse_stream --> splitter
+  tool_stream --> splitter
+  tool_stream --> gate
 
-  atem["_AtemStreamFilter / _AtemPlainFilter<br/>Glimmer channel routing -> think blocks.<br/>StreamFilter keys on live markers<br/>(optimum path keeps special tokens);<br/>PlainFilter keys on detokenized<br/>'to=self' / 'assistant to=user' text<br/>(GenAI strips the markers)"]
-  stream_vlm --> atem
+  atem["_AtemStreamFilter / _AtemPlainFilter<br/>Glimmer channel routing -> think tags.<br/>StreamFilter keys on live markers<br/>(optimum path keeps special tokens);<br/>PlainFilter keys on detokenized<br/>'to=self' / 'assistant to=user' text<br/>(GenAI strips the markers)"]
+  stream_vlm_tokens --> atem
   opt_stream_tokens --> atem
+  atem --> splitter
 
   cancel["cancel / client disconnect<br/>_cancel.set() -> streamer_callback<br/>returns True -> generation stops"]
-  stream_llm -.-> cancel
-  stream_vlm -.-> cancel
+  _sse_stream -.-> cancel
+  tool_stream -.-> cancel
 
   FINALLY["THE CANCEL SAFETY NET LIVES IN THE CONSUMERS, NOT THE SEAM:
   each consumer's finally does _cancel.set() so a client disconnect
@@ -50,11 +64,17 @@ flowchart TB
   slow prefills."]
   cancel -.-> CANCELLIMIT
 
+  ORDER["FILTER ORDER IS FIXED: ATEM (channel markers -> think tags)
+  runs inside the VLM/optimum seams, the splitter keys on the tags it
+  produces, and the gate only ever sees answer text - tool openers
+  inside a think span are reasoning, not calls."]
+  splitter -.-> ORDER
+
   classDef route fill:#e6f0ff,stroke:#0066cc,color:#000
   classDef gen fill:#e6ffe6,stroke:#00b300,color:#000
   classDef client fill:#ffffcc,stroke:#b3b300,color:#000
   classDef warn fill:#fec,stroke:#a60,color:#000
-  class stream_llm,_ollama_stream_chat,_ollama_stream_generate,generate_llm route
-  class stream_tokens,opt_stream_tokens,worker,stream_vlm,atem gen
+  class _sse_stream,stream_llm,tool_stream,_ollama_stream_chat,_ollama_stream_generate,generate_llm route
+  class stream_tokens,stream_vlm_tokens,opt_stream_tokens,worker,atem,splitter,gate gen
   class cancel,_stream_error client
-  class FINALLY,CANCELLIMIT warn
+  class FINALLY,CANCELLIMIT,ORDER warn
