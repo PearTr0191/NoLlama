@@ -898,6 +898,17 @@ def explain_genai_error(e, slot=None):
         # ways the GPU plugin can't execute. Observed on Xe-LPG (285K iGPU).
         return (f"{msg} — the OpenVINO GPU plugin cannot run this model's "
                 f"dynamic-shape graph on this GPU; serve it with --device CPU")
+    if "AUTO_DETECT" in msg:
+        # NPU compiler-in-plugin couldn't resolve the default platform.
+        # NoLlama pins NPU_PLATFORM from DEVICE_ARCHITECTURE (or --npu-platform)
+        # so this path shouldn't trigger on current drivers; if it does,
+        # the override is the fix. Must precede the generic "Compilation
+        # failed" NPU branch below — the real error contains both strings.
+        return (f"{msg} — the NPU compiler could not resolve the default "
+                f"platform (AUTO_DETECT). NoLlama pins NPU_PLATFORM from "
+                f"DEVICE_ARCHITECTURE; pass --npu-platform <arch> (e.g. 3720 "
+                f"for Meteor Lake / Arrow Lake, 4000 for Lunar Lake) to set "
+                f"it explicitly.")
     if "Compilation failed" in msg and ("NPU" in msg or "ZE_RESULT" in msg or "vpux" in msg):
         # NPU (vpux) compiler rejected the model — a model/driver-combination
         # problem, not a busy device (issue #20). Known trigger: an INT4
@@ -910,15 +921,6 @@ def explain_genai_error(e, slot=None):
                 f"model is beyond the NPU envelope (proven NPU models are "
                 f"INT4-CW, 8B params or less). Try an NPU model from the "
                 f"install menu, or run this model on GPU/CPU instead.")
-    if "AUTO_DETECT" in msg and ("NPU" in msg or "platform" in msg.lower()):
-        # The NPU compiler-in-plugin couldn't resolve the default platform.
-        # NoLlama pins NPU_PLATFORM from DEVICE_ARCHITECTURE (or --npu-platform)
-        # so this path shouldn't trigger; if it does, the override is the fix.
-        return (f"{msg} — the NPU compiler could not resolve the default "
-                f"platform (AUTO_DETECT). NoLlama pins NPU_PLATFORM from "
-                f"DEVICE_ARCHITECTURE; pass --npu-platform <arch> (e.g. 3720 "
-                f"for Meteor Lake / Arrow Lake, 4000 for Lunar Lake) to set "
-                f"it explicitly.")
     if "Could not find a model in the directory" in msg:
         # read_model() found neither openvino_model.xml nor
         # openvino_language_model.xml — usually an interrupted download that
@@ -1430,8 +1432,27 @@ class DeviceSlot:
             # NPU has a default prompt limit of 1024 tokens — raise it
             if self.device_name == "NPU":
                 if self.npu_platform:
-                    # Pin the architecture so the compiler never sees AUTO_DETECT
-                    # ([OBSERVED 2026-08-27, Meteor Lake 135H, driver 4841]).
+                    # Pin the architecture so the compiler never sees AUTO_DETECT.
+                    # Provenance for why this kwarg exists:
+                    # [OBSERVED 2026-08-27, Meteor Lake 135H, NPU 3720, Intel
+                    # NPU driver 32.0.100.4841, OpenVINO 2026.3.0
+                    # (openvino 2026.3.0-22451 / openvino-genai 2026.3.0.0-3277)]
+                    # the NPU pipeline compile failed with::
+                    #
+                    #   Exception from src/plugins/intel_npu/src/plugin/src/plugin.cpp:576:
+                    #   Exception from src/plugins/intel_npu/src/compiler_adapter/src/compiler_impl.cpp:280:
+                    #   Compilation failed. vclAllocatedExecutableCreate4 result: 0x78000004
+                    #     - [NPU_VCL] Compiler returned msg:
+                    #   ENABLE_STRIDES_FOR not supported on NPU3720
+                    #
+                    # [OBSERVED 2026-08-30] on the same box with driver
+                    # 32.0.100.5540 + OpenVINO 2026.3.1 the failure no longer
+                    # reproduces — driver-correlated. The "isolate detect_devices
+                    # in a subprocess" fix that was first proposed for this
+                    # turned out to be unproven (no A/B on the same driver);
+                    # it was dropped (PR #34). The verified guard is this
+                    # constructor kwarg, pinned from DEVICE_ARCHITECTURE (or
+                    # --npu-platform).
                     plugin_props["NPU_PLATFORM"] = self.npu_platform
                 self.pipe = ovg.LLMPipeline(
                     str(model_dir), device=self.device_id,
@@ -3908,23 +3929,12 @@ def detect_devices(npu_platform=None):
     For NPU, the resolved architecture ("3720", "4000", "5010", …) is added
     to the dict as ``platform`` — from ``npu_platform`` when given, else read
     from ``DEVICE_ARCHITECTURE``. This is the value NoLlama pins as the
-    ``NPU_PLATFORM`` constructor kwarg (see DeviceSlot.load) so the NPU
-    compiler never sees AUTO_DETECT.
-
-    [OBSERVED 2026-08-27, Meteor Lake 135H, NPU 3720, Intel NPU driver
-    32.0.100.4841, OpenVINO 2026.3.0 (openvino 2026.3.0-22451 /
-    openvino-genai 2026.3.0.0-3277)] the NPU pipeline compile failed with::
-
-        Exception from src/plugins/intel_npu/src/plugin/src/plugin.cpp:576:
-        Exception from src/plugins/intel_npu/src/compiler_adapter/src/compiler_impl.cpp:280:
-        Compilation failed. vclAllocatedExecutableCreate4 result: 0x78000004
-          - [NPU_VCL] Compiler returned msg:
-        ENABLE_STRIDES_FOR not supported on NPU3720
-
-    [OBSERVED 2026-08-30] on the same box with driver 32.0.100.5540 +
-    OpenVINO 2026.3.1 the failure no longer reproduces — driver-correlated.
-    Kept as provenance for why the NPU_PLATFORM pin exists; detection itself
-    is in-process, as on main.
+    ``NPU_PLATFORM`` constructor kwarg in DeviceSlot.load() so the NPU
+    compiler never sees AUTO_DETECT; the [OBSERVED 2026-08-27] / 2026-08-30
+    strides-failure provenance that originally motivated the pin lives next
+    to the kwarg in load() (the in-process isolation it first suggested
+    turned out to be unproven and was dropped — driver-correlated). Detection
+    itself is in-process, as on main.
     """
     devices = {}
     core = ov.Core()
